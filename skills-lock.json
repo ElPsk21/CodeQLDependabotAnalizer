@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "react-native": {
+      "source": "claude-dev-suite/claude-dev-suite",
+      "sourceType": "github",
+      "skillPath": "skills/mobile/react-native/SKILL.md",
+      "computedHash": "37669d7dbe9967e6c89bd0dd855eba5db179ca4da1d4612fa3f9f431cdff7076"
+    }
+  }
+}
