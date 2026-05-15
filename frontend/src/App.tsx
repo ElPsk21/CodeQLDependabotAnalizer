@@ -75,31 +75,60 @@ export default function App() {
   }, [checkTools]);
 
   const handleLocalScan = async () => {
-    // UI-only mock scan
-    setIsScanning(true);
-    setScanLogs(["[Scan] Initializing local environment..."]);
-    setScanProgress(0);
-    
-    const steps = [
-      { progress: 20, log: "[Deps] Checking package.json..." },
-      { progress: 40, log: "[Deps] Running npm audit (mock)..." },
-      { progress: 60, log: "[CodeQL] Detecting project language: javascript" },
-      { progress: 80, log: "[CodeQL] Running static analysis (mock)..." },
-      { progress: 100, log: "[Done] Scan complete. Found 0 vulnerabilities." }
-    ];
+    try {
+      // 1. Select folder
+      const result = await (window as any).zero.invoke("zero-native.dialog.openFile", {
+        title: "Select Project Folder",
+        allowDirectories: true,
+      });
 
-    for (let i = 0; i < steps.length; i++) {
-      await new Promise(resolve => setTimeout(resolve, 600));
-      setScanProgress(steps[i].progress);
-      setScanLogs(prev => [...prev, steps[i].log]);
+      if (!result || result.length === 0) return;
+      const projectPath = result[0];
+
+      // 2. Start scan
+      setIsScanning(true);
+      setScanLogs([`[Scan] Initializing scan for: ${projectPath}`]);
+      setScanProgress(5);
+
+      // Listen for progress logs
+      const removeListener = (window as any).zero.on("codeql-log", (detail: any) => {
+        setScanLogs(prev => [...prev, detail.message]);
+      });
+
+      try {
+        const sarifRaw = await (window as any).zero.invoke("codeql.runScan", { path: projectPath });
+
+        const sarif = JSON.parse(sarifRaw);
+        
+        // Parse SARIF alerts
+        const alerts: CodeQlAlert[] = [];
+        sarif.runs?.forEach((run: any) => {
+          run.results?.forEach((res: any, idx: number) => {
+            alerts.push({
+              type: "codeql",
+              id: `codeql-${idx}`,
+              rule: res.ruleId,
+              description: res.message.text,
+              severity: res.level === "error" ? "error" : "warning",
+              location: res.locations?.[0]?.physicalLocation?.artifactLocation?.uri || "unknown",
+            });
+          });
+        });
+
+        setCodeQlAlerts(alerts);
+        setIsLoaded(true);
+      } catch (err: any) {
+        setScanLogs(prev => [...prev, `[Error] ${err.message || err}`]);
+      } finally {
+        removeListener();
+        setIsScanning(false);
+        setScanProgress(0);
+      }
+    } catch (err: any) {
+      console.error("Scan failed", err);
     }
-
-    setTimeout(() => {
-      setIsScanning(false);
-      setIsLoaded(true);
-      setScanProgress(0);
-    }, 800);
   };
+
 
   const resetState = () => {
     setIsLoaded(false);
@@ -283,10 +312,36 @@ export default function App() {
               </div>
               
               <div className="tab-content">
-                <div className="empty-state text-muted" style={{ padding: '60px' }}>
-                  <p>Scan complete (Mock). No findings to display in this UI-only version.</p>
-                </div>
+                {activeTab === "codeql" ? (
+                  codeQlAlerts.length > 0 ? (
+                    <div className="alerts-list">
+                      {codeQlAlerts.map(alert => (
+                        <div key={alert.id} className="alert-item" onClick={() => setSelectedAlert(alert)}>
+                          <div className="alert-main">
+                            <span className={`severity-badge ${getSeverityBadgeClass(alert.severity)}`}>
+                              {alert.severity}
+                            </span>
+                            <div className="alert-info">
+                              <div className="alert-rule">{alert.rule}</div>
+                              <div className="alert-desc">{alert.description}</div>
+                              <div className="alert-loc">{alert.location}</div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="empty-state text-muted" style={{ padding: '60px' }}>
+                      <p>No CodeQL findings in this project.</p>
+                    </div>
+                  )
+                ) : (
+                  <div className="empty-state text-muted" style={{ padding: '60px' }}>
+                    <p>Dependency analysis not implemented yet.</p>
+                  </div>
+                )}
               </div>
+
             </section>
           )}
         </div>
