@@ -24,6 +24,16 @@ interface DependabotAlert {
   urls?: string[];
 }
 
+interface ScanStats {
+  total: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  duration: number; // in seconds
+  projectPath: string;
+}
+
 interface ToolStatus {
   npm: boolean;
   codeql: boolean;
@@ -49,6 +59,8 @@ export default function App() {
   // States for parsed data
   const [codeQlAlerts, setCodeQlAlerts] = useState<CodeQlAlert[]>([]);
   const [dependabotAlerts, setDependabotAlerts] = useState<DependabotAlert[]>([]);
+  const [scanStats, setScanStats] = useState<ScanStats | null>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
   
   // State for detail view
   const [selectedAlert, setSelectedAlert] = useState<CodeQlAlert | DependabotAlert | null>(null);
@@ -96,9 +108,43 @@ export default function App() {
       });
 
       try {
-        const sarifRaw = await (window as any).zero.invoke("codeql.runScan", { path: projectPath });
+        setScanError(null);
+        const startTime = Date.now();
+        console.log("[JS] Starting invoke: codeql.runScan");
+        let rawResponse = await (window as any).zero.invoke("codeql.runScan", { path: projectPath });
+        const endTime = Date.now();
+        
+        let sarifRaw: string;
+        
+        // Comprehensive check for binary/buffer data
+        if (typeof rawResponse === "string") {
+          sarifRaw = rawResponse;
+        } else if (rawResponse instanceof Uint8Array || (rawResponse && typeof rawResponse === "object" && "buffer" in rawResponse)) {
+          console.log("[JS] Received binary-like data, decoding...");
+          sarifRaw = new TextDecoder().decode(rawResponse as any);
+        } else if (rawResponse === null || rawResponse === undefined) {
+          throw new Error("Scan engine returned no data.");
+        } else {
+          // Try to stringify if it's already an object
+          console.log("[JS] Received non-string response type:", typeof rawResponse);
+          sarifRaw = JSON.stringify(rawResponse);
+        }
 
-        const sarif = JSON.parse(sarifRaw);
+        console.log(`[JS] Response processed. Size: ${sarifRaw.length} chars`);
+
+        if (sarifRaw.trim().length === 0) {
+          throw new Error("Received empty text from scan engine.");
+        }
+
+        console.log("[JS] Parsing SARIF JSON...");
+        let sarif: any;
+        try {
+          sarif = JSON.parse(sarifRaw);
+        } catch (e: any) {
+          console.error("[JS] JSON Parse Error. First 100 chars:", sarifRaw.substring(0, 100));
+          throw new Error(`Failed to parse SARIF results: ${e.message}`);
+        }
+        console.log("[JS] SARIF parsed successfully. Runs:", sarif.runs?.length);
         
         // Parse SARIF alerts
         const alerts: CodeQlAlert[] = [];
@@ -115,10 +161,26 @@ export default function App() {
           });
         });
 
+        // Calculate stats
+        const stats: ScanStats = {
+          total: alerts.length,
+          critical: alerts.filter(a => a.severity === "error").length,
+          high: alerts.filter(a => a.severity === "warning").length,
+          medium: 0,
+          low: 0,
+          duration: Math.round((endTime - startTime) / 1000),
+          projectPath: projectPath
+        };
+
+        setScanStats(stats);
         setCodeQlAlerts(alerts);
+        console.log(`[JS] Scan complete. Found ${alerts.length} alerts. Switching UI...`);
         setIsLoaded(true);
       } catch (err: any) {
-        setScanLogs(prev => [...prev, `[Error] ${err.message || err}`]);
+        console.error("[JS] Error processing scan results:", err);
+        const errMsg = err.message || String(err);
+        setScanError(errMsg);
+        setScanLogs(prev => [...prev, `[Error] ${errMsg}`]);
       } finally {
         removeListener();
         setIsScanning(false);
@@ -132,8 +194,11 @@ export default function App() {
 
   const resetState = () => {
     setIsLoaded(false);
+    setIsScanning(false);
+    setScanError(null);
     setCodeQlAlerts([]);
     setDependabotAlerts([]);
+    setScanStats(null);
   };
 
   const getSeverityBadgeClass = (severity: string) => {
@@ -251,16 +316,18 @@ export default function App() {
 
         <div className="content-card">
           {!isLoaded ? (
-            isScanning ? (
+            (isScanning || scanError) ? (
               <section className="scanning-section">
                 <div className="scanning-header">
-                  <h2>Active Security Scan</h2>
-                  <p>Running security analysis...</p>
+                  <h2>{scanError ? "Scan Failed" : "Active Security Scan"}</h2>
+                  <p>{scanError ? "An error occurred during analysis" : "Running security analysis..."}</p>
                 </div>
                 
-                <div className="progress-bar-container">
-                  <div className="progress-bar-fill" style={{ width: `${scanProgress}%` }}></div>
-                </div>
+                {!scanError && (
+                  <div className="progress-bar-container">
+                    <div className="progress-bar-fill" style={{ width: `${scanProgress}%` }}></div>
+                  </div>
+                )}
                 
                 <div className="terminal-mock">
                   <div className="terminal-header">
@@ -276,6 +343,17 @@ export default function App() {
                     <div className="terminal-cursor">_</div>
                   </div>
                 </div>
+
+                {scanError && (
+                  <div className="scan-error-banner" style={{ marginTop: '1rem', padding: '1rem', background: '#fee2e2', border: '1px solid #ef4444', borderRadius: '8px', color: '#b91c1c' }}>
+                    <strong>Scan Error:</strong> {scanError}
+                    <div style={{ marginTop: '0.5rem' }}>
+                      <button className="btn-secondary" onClick={resetState} style={{ padding: '6px 12px', fontSize: '0.875rem' }}>
+                        Dismiss & Try Again
+                      </button>
+                    </div>
+                  </div>
+                )}
               </section>
             ) : (
               <section className="upload-section">
@@ -292,6 +370,45 @@ export default function App() {
             )
           ) : (
             <section className="reports-section">
+              {scanStats && (
+                <div className="analysis-summary-banner">
+                  <div className="summary-header">
+                    <div className="summary-title-group">
+                      <h2>Analysis Summary</h2>
+                      <div className="project-badge">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                        {scanStats.projectPath.split('/').pop()}
+                      </div>
+                    </div>
+                    <div className="summary-meta">
+                      <span className="meta-item">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                        {scanStats.duration}s scan time
+                      </span>
+                    </div>
+                  </div>
+                  
+                  <div className="summary-grid">
+                    <div className="summary-card total">
+                      <span className="value">{scanStats.total}</span>
+                      <span className="label">Total Findings</span>
+                    </div>
+                    <div className="summary-card critical">
+                      <span className="value">{scanStats.critical}</span>
+                      <span className="label">Critical/Errors</span>
+                    </div>
+                    <div className="summary-card high">
+                      <span className="value">{scanStats.high}</span>
+                      <span className="label">High/Warnings</span>
+                    </div>
+                    <div className="summary-card medium">
+                      <span className="value">{scanStats.medium}</span>
+                      <span className="label">Medium</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="tabs">
                 <button 
                   className={`tab-btn ${activeTab === "codeql" ? "active" : ""}`}
