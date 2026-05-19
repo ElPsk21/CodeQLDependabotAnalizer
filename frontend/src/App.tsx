@@ -8,6 +8,9 @@ interface CodeQlAlert {
   description: string;
   severity: "error" | "warning" | "note" | "none";
   location: string;
+  fullPath?: string;
+  startLine?: number;
+  endLine?: number;
   helpText?: string;
   snippet?: string;
 }
@@ -64,6 +67,60 @@ export default function App() {
   
   // State for detail view
   const [selectedAlert, setSelectedAlert] = useState<CodeQlAlert | DependabotAlert | null>(null);
+  const [isLoadingSnippet, setIsLoadingSnippet] = useState(false);
+  const [snippetCache, setSnippetCache] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (selectedAlert && selectedAlert.type === "codeql" && scanStats) {
+      const alertId = selectedAlert.id;
+      if (snippetCache[alertId]) return;
+
+      const fetchSnippet = async () => {
+        setIsLoadingSnippet(true);
+        console.log("[JS] Fetching snippet for alert:", selectedAlert);
+        try {
+          const projectRoot = scanStats.projectPath;
+          const fullPath = selectedAlert.fullPath?.startsWith("/") 
+            ? selectedAlert.fullPath 
+            : `${projectRoot}/${selectedAlert.location}`;
+            
+          const start = Math.max(1, (selectedAlert.startLine || 1) - 2);
+          const end = (selectedAlert.endLine || 1) + 2;
+
+          const payload = {
+            path: fullPath,
+            startLine: start,
+            endLine: end
+          };
+          console.log("[JS] Calling codeql.readSnippet with payload:", payload);
+
+          const rawSnippet = await (window as any).zero.invoke("codeql.readSnippet", payload);
+          console.log("[JS] codeql.readSnippet returned type:", typeof rawSnippet);
+
+          let snippetText = "";
+          if (typeof rawSnippet === "string") {
+            try {
+              snippetText = JSON.parse(rawSnippet).content;
+            } catch (e) {
+              snippetText = rawSnippet;
+            }
+          } else if (rawSnippet && typeof rawSnippet === 'object' && 'content' in rawSnippet) {
+            snippetText = rawSnippet.content;
+          }
+
+          if (snippetText) {
+            console.log("[JS] Setting snippet text in cache, length:", snippetText.length);
+            setSnippetCache(prev => ({ ...prev, [alertId]: snippetText }));
+          }
+        } catch (err) {
+          console.error("[JS] Failed to fetch snippet", err);
+        } finally {
+          setIsLoadingSnippet(false);
+        }
+      };
+      fetchSnippet();
+    }
+  }, [selectedAlert?.id, scanStats, snippetCache]);
 
   const checkTools = useCallback(async () => {
     setIsCheckingTools(true);
@@ -80,7 +137,7 @@ export default function App() {
     }, 500);
   }, []);
 
-  useEffect(() => {
+  useEffect(() => { console.log("[JS] TRACE: useEffect triggered", selectedAlert?.id);
     const hasZero = !!(window as any).zero;
     setBridge(hasZero ? "available" : "not enabled");
     if (hasZero) checkTools();
@@ -150,13 +207,19 @@ export default function App() {
         const alerts: CodeQlAlert[] = [];
         sarif.runs?.forEach((run: any) => {
           run.results?.forEach((res: any, idx: number) => {
+            const loc = res.locations?.[0]?.physicalLocation;
+            const region = loc?.region;
+            const relativePath = loc?.artifactLocation?.uri || "unknown";
             alerts.push({
               type: "codeql",
               id: `codeql-${idx}`,
               rule: res.ruleId,
               description: res.message.text,
               severity: res.level === "error" ? "error" : "warning",
-              location: res.locations?.[0]?.physicalLocation?.artifactLocation?.uri || "unknown",
+              location: relativePath,
+              fullPath: projectPath.endsWith('/') ? `${projectPath}${relativePath}` : `${projectPath}/${relativePath}`,
+              startLine: region?.startLine || 0,
+              endLine: region?.endLine || region?.startLine || 0,
             });
           });
         });
@@ -199,6 +262,7 @@ export default function App() {
     setCodeQlAlerts([]);
     setDependabotAlerts([]);
     setScanStats(null);
+    setSnippetCache({});
   };
 
   const getSeverityBadgeClass = (severity: string) => {
@@ -470,12 +534,54 @@ export default function App() {
       <div className={`drawer-backdrop ${selectedAlert ? 'open' : ''}`} onClick={() => setSelectedAlert(null)}></div>
       <div className={`drawer ${selectedAlert ? 'open' : ''}`}>
         {selectedAlert && (
-          <div className="drawer-header">
-             <h2>Detail View</h2>
-             <button className="drawer-close" onClick={() => setSelectedAlert(null)}>
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-             </button>
-          </div>
+          <>
+            <div className="drawer-header">
+               <h2>Detail View</h2>
+               <button className="drawer-close" onClick={() => setSelectedAlert(null)}>
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+               </button>
+            </div>
+            <div className="drawer-body" style={{ padding: '20px' }}>
+              <div style={{ marginBottom: '15px' }}>
+                <span className={`severity-badge ${getSeverityBadgeClass(selectedAlert.severity)}`}>
+                  {selectedAlert.severity}
+                </span>
+                <h3 style={{ marginTop: '10px' }}>{selectedAlert.type === 'codeql' ? selectedAlert.rule : 'Dependabot Alert'}</h3>
+              </div>
+              
+              <p style={{ color: '#666', lineHeight: '1.5' }}>{selectedAlert.description}</p>
+              
+              <div style={{ marginTop: '20px' }}>
+                <h4 style={{ marginBottom: '8px' }}>Location</h4>
+                <code style={{ background: '#f0f0f0', padding: '4px 8px', borderRadius: '4px' }}>
+                  {selectedAlert.type === 'codeql' ? `${selectedAlert.location}:${selectedAlert.startLine}` : 'package.json'}
+                </code>
+              </div>
+
+              {selectedAlert.type === 'codeql' && (
+                <div style={{ marginTop: '20px' }}>
+                  <h4 style={{ marginBottom: '8px' }}>Code Context</h4>
+                  {isLoadingSnippet ? (
+                    <div style={{ color: '#888', fontStyle: 'italic' }}>Loading code context...</div>
+                  ) : snippetCache[selectedAlert.id] ? (
+                    <pre style={{ 
+                      background: '#1e1e1e', 
+                      color: '#d4d4d4', 
+                      padding: '15px', 
+                      borderRadius: '8px', 
+                      overflowX: 'auto',
+                      fontSize: '13px',
+                      fontFamily: 'monospace'
+                    }}>
+                      <code>{snippetCache[selectedAlert.id]}</code>
+                    </pre>
+                  ) : (
+                    <div style={{ color: '#888' }}>No snippet available.</div>
+                  )}
+                </div>
+              )}
+            </div>
+          </>
         )}
       </div>
     </div>

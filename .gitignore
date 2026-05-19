@@ -1,3 +1,4 @@
+.gitignore
 # Dependencies
 node_modules/
 .pnp
@@ -37,4 +38,5 @@ yarn-error.log*
 
 # Temporary files
 test_time.zig
+mejoras_sistema.md
 /tmp/
