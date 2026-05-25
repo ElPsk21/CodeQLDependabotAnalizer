@@ -56,9 +56,9 @@ Este comando es gestionado por [`project_detector_bridge.zig`](file:///home/fran
 
 1. Se extrae el campo `path` del payload JSON.
 2. Se lanza un hilo separado (`std.Thread.spawn`) para no bloquear el bridge IPC.
-3. Dentro del hilo ([`detectStackInternal`](file:///home/frano/my_app/src/project_detector_bridge.zig#L39-L84)), se ejecuta el script Python:
+3. Dentro del hilo ([`detectStackInternal`](file:///home/frano/my_app/src/project_detector_bridge.zig#L39-L84)), se resuelve la ruta del script relativamente al ejecutable y se ejecuta:
    ```
-   /home/frano/my_app/scripts/project_detector.py <ruta_del_proyecto>
+   <exe_dir>/../scripts/project_detector.py <ruta_del_proyecto>
    ```
 4. El `stdout` del script (JSON) se devuelve al frontend vía `responder.success()`.
 
@@ -143,13 +143,14 @@ En [`App.tsx` → `startAnalysis()`](file:///home/frano/my_app/frontend/src/App.
 
 1. **Database Create**: Ejecuta en bash:
    ```bash
-   export PATH=/home/frano/.dotnet:$PATH && \
+   export PATH=<dotnet_path>:$PATH && \
    "<codeql_path>" database create "<db_path>" \
      --source-root "<project_path>" --language=<lang> --overwrite
    ```
+   (Las rutas `codeql_path` y `dotnet_path` se configuran desde **Settings → Tool Paths**.)
 2. **Database Analyze**: Ejecuta:
    ```bash
-   export PATH=/home/frano/.dotnet:$PATH && \
+   export PATH=<dotnet_path>:$PATH && \
    "<codeql_path>" database analyze "<db_path>" \
      --format=sarif-latest --output "<sarif_path>"
    ```
@@ -160,9 +161,9 @@ En [`App.tsx` → `startAnalysis()`](file:///home/frano/my_app/frontend/src/App.
 
 [`dependabot_bridge.zig` → `runScanInternal()`](file:///home/frano/my_app/src/dependabot_bridge.zig#L61-L110):
 
-1. Ejecuta el script Python:
+1. Resuelve la ruta del script relativamente al ejecutable y lo ejecuta:
    ```
-   /home/frano/my_app/scripts/dependabot_runner.py <ruta> <ecosistema> <directorio>
+   <exe_dir>/../scripts/dependabot_runner.py <ruta> <ecosistema> <directorio> [<dependabot_cli_path>]
    ```
 2. [`dependabot_runner.py`](file:///home/frano/my_app/scripts/dependabot_runner.py) ejecuta el CLI de Dependabot:
    ```
@@ -206,6 +207,7 @@ Se registran los siguientes comandos bridge:
 | `dependabot.runScan` | `DependabotBridge.runScan` | `dependabot_bridge.zig` |
 | `project.detectStack` | `ProjectDetectorBridge.detectStack` | `project_detector_bridge.zig` |
 | `scan.saveResults` | `SystemBridge.saveResults` | `main.zig` |
+| `settings.updatePaths` | `SettingsBridge.updatePaths` | `main.zig` |
 | `zero-native.dialog.openFile` | (Builtin) | zero-native |
 
 ---
@@ -220,4 +222,4 @@ Se detectó que cuando CodeQL fallaba (p.ej., por falta de un SDK), el backend i
 
 ### PATH de .NET para proyectos C#
 
-Los comandos de CodeQL se ejecutan con `export PATH=/home/frano/.dotnet:$PATH` antepuesto, para que el auto-builder de CodeQL encuentre el SDK de .NET necesario para compilar proyectos C#.
+Los comandos de CodeQL se ejecutan con `export PATH=<dotnet_path>:$PATH` antepuesto, donde `<dotnet_path>` se configura desde **Settings → Tool Paths → dotnet SDK PATH**. Esto permite que el auto-builder de CodeQL encuentre el SDK de .NET necesario para compilar proyectos C#.

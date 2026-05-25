@@ -4,6 +4,7 @@ const zero_native = @import("zero-native");
 pub const DependabotBridge = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    dependabot_cli_path: []const u8 = "",
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) DependabotBridge {
         return .{ .allocator = allocator, .io = io };
@@ -75,15 +76,71 @@ pub const DependabotBridge = struct {
 
         self.emitLog(responder, "[Dependabot] Starting dependency scan...") catch {};
 
-        const script_path = "/home/frano/my_app/scripts/dependabot_runner.py";
-
-        const result = std.process.run(allocator, self.io, .{
-            .argv = &.{ script_path, project_path, ecosystem, directory },
-        }) catch |err| {
-            std.debug.print("[Error] Failed to start Dependabot script: {s}\n", .{@errorName(err)});
-            self.fail(responder, request_id, "Failed to run dependabot script", err) catch {};
+        // Resolve script path dynamically
+        var exe_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const exe_path_len = std.Io.Dir.readLinkAbsolute(self.io, "/proc/self/exe", &exe_path_buf) catch {
+            self.fail(responder, request_id, "Failed to resolve exe path", error.Unexpected) catch {};
             return;
         };
+        const exe_dir_path = std.fs.path.dirname(exe_path_buf[0..exe_path_len]) orelse ".";
+
+        const candidates = &[_][]const u8{
+            "../../scripts/dependabot_runner.py",
+            "../../../../scripts/dependabot_runner.py",
+            "../scripts/dependabot_runner.py",
+            "/home/frano/my_app/scripts/dependabot_runner.py",
+        };
+
+        var resolved_script_path: ?[]const u8 = null;
+        for (candidates) |candidate| {
+            const joined_path = if (std.fs.path.isAbsolute(candidate))
+                allocator.dupe(u8, candidate) catch {
+                    self.fail(responder, request_id, "OOM building script path", error.OutOfMemory) catch {};
+                    return;
+                }
+            else
+                std.fs.path.join(allocator, &.{ exe_dir_path, candidate }) catch {
+                    self.fail(responder, request_id, "OOM building script path", error.OutOfMemory) catch {};
+                    return;
+                };
+            
+            if (std.Io.Dir.openFileAbsolute(self.io, joined_path, .{})) |file| {
+                file.close(self.io);
+                resolved_script_path = joined_path;
+                break;
+            } else |_| {
+                allocator.free(joined_path);
+            }
+        }
+
+        const script_path = resolved_script_path orelse {
+            self.fail(responder, request_id, "Failed to locate dependabot_runner.py script", error.FileNotFound) catch {};
+            return;
+        };
+        defer allocator.free(script_path);
+
+        // Parse optional dependabotCliPath from the payload
+        var dep_cli_path: []const u8 = "";
+        if (self.dependabot_cli_path.len > 0) {
+            dep_cli_path = self.dependabot_cli_path;
+        }
+
+        const result = if (dep_cli_path.len > 0)
+            std.process.run(allocator, self.io, .{
+                .argv = &.{ script_path, project_path, ecosystem, directory, dep_cli_path },
+            }) catch |err| {
+                std.debug.print("[Error] Failed to start Dependabot script: {s}\n", .{@errorName(err)});
+                self.fail(responder, request_id, "Failed to run dependabot script", err) catch {};
+                return;
+            }
+        else
+            std.process.run(allocator, self.io, .{
+                .argv = &.{ script_path, project_path, ecosystem, directory },
+            }) catch |err| {
+                std.debug.print("[Error] Failed to start Dependabot script: {s}\n", .{@errorName(err)});
+                self.fail(responder, request_id, "Failed to run dependabot script", err) catch {};
+                return;
+            };
         defer allocator.free(result.stdout);
         defer allocator.free(result.stderr);
 

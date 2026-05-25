@@ -63,7 +63,10 @@ export default function App() {
   const [scanProgress, setScanProgress] = useState(0);
   const [toolStatus, setToolStatus] = useState<ToolStatus | null>(null);
   const [isCheckingTools, setIsCheckingTools] = useState(false);
-  const [codeqlPathInput, setCodeqlPathInput] = useState("");
+  const [codeqlPath, setCodeqlPath] = useState(() => localStorage.getItem("settings.codeqlPath") || "");
+  const [dependabotCliPath, setDependabotCliPath] = useState(() => localStorage.getItem("settings.dependabotCliPath") || "");
+  const [dotnetPath, setDotnetPath] = useState(() => localStorage.getItem("settings.dotnetPath") || "");
+  const [settingsSaved, setSettingsSaved] = useState(false);
   const [depSearch, setDepSearch] = useState("");
   const [depSort, setDepSort] = useState<"name" | "action">("name");
 
@@ -151,11 +154,58 @@ export default function App() {
     }, 500);
   }, []);
 
+  const sendPathsToBackend = useCallback(async () => {
+    if (!(window as any).zero) return;
+    try {
+      await (window as any).zero.invoke("settings.updatePaths", {
+        codeqlPath: localStorage.getItem("settings.codeqlPath") || "",
+        dependabotCliPath: localStorage.getItem("settings.dependabotCliPath") || "",
+        dotnetPath: localStorage.getItem("settings.dotnetPath") || ""
+      });
+    } catch (e) {
+      console.debug("[JS] settings.updatePaths not available yet", e);
+    }
+  }, []);
+
+  const handleBrowse = async (setter: (v: string) => void, key: string) => {
+    try {
+      const result = await (window as any).zero.invoke("zero-native.dialog.openFile", {
+        title: "Select file",
+      });
+      if (result?.[0]) {
+        let filePath: string = result[0];
+        if (filePath.length >= 2 && filePath[1] === ':' && /^[a-zA-Z]$/.test(filePath[0])) {
+          const driveLetter = filePath[0].toLowerCase();
+          const rest = filePath.substring(2).replace(/\\/g, '/');
+          filePath = `/mnt/${driveLetter}${rest}`;
+        } else if (filePath.includes('\\')) {
+          filePath = filePath.replace(/\\/g, '/');
+        }
+        setter(filePath);
+        localStorage.setItem(key, filePath);
+      }
+    } catch (err) {
+      console.error("[JS] Browse failed", err);
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    localStorage.setItem("settings.codeqlPath", codeqlPath);
+    localStorage.setItem("settings.dependabotCliPath", dependabotCliPath);
+    localStorage.setItem("settings.dotnetPath", dotnetPath);
+    await sendPathsToBackend();
+    setSettingsSaved(true);
+    setTimeout(() => setSettingsSaved(false), 2000);
+  };
+
   useEffect(() => { console.log("[JS] TRACE: useEffect triggered", selectedAlert?.id);
     const hasZero = !!(window as any).zero;
     setBridge(hasZero ? "available" : "not enabled");
-    if (hasZero) checkTools();
-  }, [checkTools]);
+    if (hasZero) {
+      checkTools();
+      sendPathsToBackend();
+    }
+  }, [checkTools, sendPathsToBackend]);
 
   const handleLocalScan = async () => {
     try {
@@ -250,11 +300,11 @@ export default function App() {
 
       codeqlLangs.forEach(lang => {
         console.debug(`[JS] startAnalysis: Preparando CodeQL para lenguaje: ${lang}`);
-        promises.push((window as any).zero.invoke("codeql.runScan", { path: currentProjectPath, language: lang }).then((res: any) => ({ type: 'codeql', lang, result: res })));
+        promises.push((window as any).zero.invoke("codeql.runScan", { path: currentProjectPath, language: lang, codeqlPath, dotnetPath }).then((res: any) => ({ type: 'codeql', lang, result: res })));
       });
       depEcos.forEach(eco => {
         console.debug(`[JS] startAnalysis: Preparando Dependabot para ecosistema: ${eco.name} en ${eco.directory}`);
-        promises.push((window as any).zero.invoke("dependabot.runScan", { path: currentProjectPath, ecosystem: eco.name, directory: eco.directory }).then((res: any) => ({ type: 'dependabot', eco, result: res })));
+        promises.push((window as any).zero.invoke("dependabot.runScan", { path: currentProjectPath, ecosystem: eco.name, directory: eco.directory, dependabotCliPath }).then((res: any) => ({ type: 'dependabot', eco, result: res })));
       });
 
       console.debug(`[JS] startAnalysis: Lanzando ${promises.length} invocaciones en paralelo (CodeQL y Dependabot).`);
@@ -525,21 +575,76 @@ export default function App() {
 
             <div className="content-card settings-card">
               <div className="settings-card-header">
-                <h2>CodeQL Configuration</h2>
+                <h2>Tool Paths</h2>
               </div>
-              <div className="settings-field">
-                <label htmlFor="codeql-path">CodeQL CLI Path</label>
-                <div className="settings-input-row">
-                  <input
-                    id="codeql-path"
-                    type="text"
-                    className="settings-input"
-                    value={codeqlPathInput}
-                    onChange={e => setCodeqlPathInput(e.target.value)}
-                    placeholder="e.g. /home/user/.local/share/codeql/codeql"
-                  />
+              <div className="settings-path-group">
+                <div className="settings-field">
+                  <label htmlFor="codeql-path">CodeQL CLI Path</label>
+                  <div className="settings-input-row">
+                    <input
+                      id="codeql-path"
+                      type="text"
+                      className="settings-input"
+                      value={codeqlPath}
+                      onChange={e => setCodeqlPath(e.target.value)}
+                      placeholder="e.g. /usr/local/bin/codeql"
+                    />
+                    <button className="settings-browse-btn" onClick={() => handleBrowse(setCodeqlPath, "settings.codeqlPath")}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                      Browse
+                    </button>
+                  </div>
+                  <p className="settings-help">Path to the CodeQL CLI binary.</p>
                 </div>
-                <p className="settings-help">Custom paths are currently disabled in this demo.</p>
+
+                <div className="settings-field">
+                  <label htmlFor="dependabot-path">Dependabot CLI Path</label>
+                  <div className="settings-input-row">
+                    <input
+                      id="dependabot-path"
+                      type="text"
+                      className="settings-input"
+                      value={dependabotCliPath}
+                      onChange={e => setDependabotCliPath(e.target.value)}
+                      placeholder="e.g. /usr/local/bin/dependabot"
+                    />
+                    <button className="settings-browse-btn" onClick={() => handleBrowse(setDependabotCliPath, "settings.dependabotCliPath")}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                      Browse
+                    </button>
+                  </div>
+                  <p className="settings-help">Path to the Dependabot CLI binary. Falls back to system PATH if empty.</p>
+                </div>
+
+                <div className="settings-field">
+                  <label htmlFor="dotnet-path">dotnet SDK PATH</label>
+                  <div className="settings-input-row">
+                    <input
+                      id="dotnet-path"
+                      type="text"
+                      className="settings-input"
+                      value={dotnetPath}
+                      onChange={e => setDotnetPath(e.target.value)}
+                      placeholder="e.g. /home/user/.dotnet"
+                    />
+                    <button className="settings-browse-btn" onClick={() => handleBrowse(setDotnetPath, "settings.dotnetPath")}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                      Browse
+                    </button>
+                  </div>
+                  <p className="settings-help">Directory containing the dotnet SDK. Only required for C#/.NET projects.</p>
+                </div>
+              </div>
+
+              <div className="settings-actions">
+                <button className={`settings-save-btn ${settingsSaved ? 'saved' : ''}`} onClick={handleSaveSettings}>
+                  {settingsSaved ? (
+                    <><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Saved</>
+                  ) : (
+                    <><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg> Save Settings</>
+                  )}
+                </button>
+                {settingsSaved && <span className="settings-saved-msg">✓ Paths updated successfully</span>}
               </div>
             </div>
 
@@ -760,28 +865,40 @@ export default function App() {
               
               <div className="tab-content">
                 {activeTab === "codeql" ? (
-                  codeQlAlerts.length > 0 ? (
-                    <div className="alerts-list">
-                      {codeQlAlerts.map(alert => (
-                        <div key={alert.id} className="alert-item" onClick={() => setSelectedAlert(alert)}>
-                          <div className="alert-main">
-                            <span className={`severity-badge ${getSeverityBadgeClass(alert.severity)}`}>
-                              {alert.severity}
-                            </span>
-                            <div className="alert-info">
-                              <div className="alert-rule">{alert.rule}</div>
-                              <div className="alert-desc">{alert.description}</div>
-                              <div className="alert-loc">{alert.location}</div>
+                  <div className="codeql-view">
+                    {codeQlAlerts.length > 0 && (
+                      <div className="codeql-action-bar" style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px' }}>
+                        <button className="resolver-btn" onClick={() => {}}>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                          </svg>
+                          Resolver incidencias
+                        </button>
+                      </div>
+                    )}
+                    {codeQlAlerts.length > 0 ? (
+                      <div className="alerts-list">
+                        {codeQlAlerts.map(alert => (
+                          <div key={alert.id} className="alert-item" onClick={() => setSelectedAlert(alert)}>
+                            <div className="alert-main">
+                              <span className={`severity-badge ${getSeverityBadgeClass(alert.severity)}`}>
+                                {alert.severity}
+                              </span>
+                              <div className="alert-info">
+                                <div className="alert-rule">{alert.rule}</div>
+                                <div className="alert-desc">{alert.description}</div>
+                                <div className="alert-loc">{alert.location}</div>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="empty-state text-muted" style={{ padding: '60px' }}>
-                      <p>No CodeQL findings in this project.</p>
-                    </div>
-                  )
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="empty-state text-muted" style={{ padding: '60px' }}>
+                        <p>No CodeQL findings in this project.</p>
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   dependabotAlerts.length > 0 ? (
                     <div className="dep-view">
@@ -828,6 +945,12 @@ export default function App() {
                           <option value="name">Sort by Name</option>
                           <option value="action">Sort by Action</option>
                         </select>
+                        <button className="resolver-btn" onClick={() => {}} style={{ marginLeft: 'auto' }}>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                          </svg>
+                          Resolver incidencias
+                        </button>
                       </div>
 
                       <div className="dep-table-container">

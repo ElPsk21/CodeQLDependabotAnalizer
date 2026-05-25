@@ -47,7 +47,48 @@ pub const ProjectDetectorBridge = struct {
         defer allocator.free(request_id);
         defer allocator.destroy(args);
 
-        const script_path = "/home/frano/my_app/scripts/project_detector.py";
+        // Resolve script path dynamically
+        var exe_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const exe_path_len = std.Io.Dir.readLinkAbsolute(self.io, "/proc/self/exe", &exe_path_buf) catch {
+            self.fail(responder, request_id, "Failed to resolve exe path", error.Unexpected) catch {};
+            return;
+        };
+        const exe_dir_path = std.fs.path.dirname(exe_path_buf[0..exe_path_len]) orelse ".";
+
+        const candidates = &[_][]const u8{
+            "../../scripts/project_detector.py",
+            "../../../../scripts/project_detector.py",
+            "../scripts/project_detector.py",
+            "/home/frano/my_app/scripts/project_detector.py",
+        };
+
+        var resolved_script_path: ?[]const u8 = null;
+        for (candidates) |candidate| {
+            const joined_path = if (std.fs.path.isAbsolute(candidate))
+                allocator.dupe(u8, candidate) catch {
+                    self.fail(responder, request_id, "OOM building script path", error.OutOfMemory) catch {};
+                    return;
+                }
+            else
+                std.fs.path.join(allocator, &.{ exe_dir_path, candidate }) catch {
+                    self.fail(responder, request_id, "OOM building script path", error.OutOfMemory) catch {};
+                    return;
+                };
+            
+            if (std.Io.Dir.openFileAbsolute(self.io, joined_path, .{})) |file| {
+                file.close(self.io);
+                resolved_script_path = joined_path;
+                break;
+            } else |_| {
+                allocator.free(joined_path);
+            }
+        }
+
+        const script_path = resolved_script_path orelse {
+            self.fail(responder, request_id, "Failed to locate project_detector.py script", error.FileNotFound) catch {};
+            return;
+        };
+        defer allocator.free(script_path);
 
         const result = std.process.run(allocator, self.io, .{
             .argv = &.{ script_path, project_path },

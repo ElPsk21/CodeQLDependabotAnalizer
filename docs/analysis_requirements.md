@@ -16,15 +16,18 @@ Estos componentes son necesarios independientemente del tipo de proyecto:
 | **Dependabot CLI** | Análisis de dependencias vulnerables | Ruta configurada en `dependabot_runner.py` |
 | **Docker** | Requerido por Dependabot CLI para ejecutar actualizadores | `docker --version` |
 
-### Rutas actuales configuradas
+### Rutas configurables (Settings)
 
-| Herramienta | Ruta en el código |
-|-------------|-------------------|
-| CodeQL CLI | `/home/frano/Programs/opt/codeql/codeql` (en [`bridge.zig:7`](file:///home/frano/my_app/src/bridge.zig#L7)) |
-| Dependabot CLI | `/home/frano/Programs/dependabotCli/dependabot-cli/dependabot` (en [`dependabot_runner.py:24`](file:///home/frano/my_app/scripts/dependabot_runner.py#L24)) |
-| Tokei | `scripts/tokei` (en [`project_detector.py:142`](file:///home/frano/my_app/scripts/project_detector.py#L142)) |
-| Script detector | `/home/frano/my_app/scripts/project_detector.py` (en [`project_detector_bridge.zig:50`](file:///home/frano/my_app/src/project_detector_bridge.zig#L50)) |
-| Script Dependabot | `/home/frano/my_app/scripts/dependabot_runner.py` (en [`dependabot_bridge.zig:78`](file:///home/frano/my_app/src/dependabot_bridge.zig#L78)) |
+Todas las rutas de herramientas externas son configurables desde la sección **Settings → Tool Paths** de la interfaz gráfica. Los valores se persisten en `localStorage` y se envían al backend vía el handler IPC `settings.updatePaths`.
+
+| Herramienta | Configuración |
+|-------------|---------------|
+| CodeQL CLI | Campo "CodeQL CLI Path" en Settings. Si está vacío, se asume que `codeql` está en el PATH del sistema. |
+| Dependabot CLI | Campo "Dependabot CLI Path" en Settings. Si está vacío, se asume que `dependabot` está en el PATH del sistema. |
+| dotnet SDK | Campo "dotnet SDK PATH" en Settings. Solo necesario para proyectos C#/.NET. |
+| Tokei | `scripts/tokei` (resuelto automáticamente por `project_detector.py` relativo al script). |
+| Script detector | Resuelto automáticamente relativo al ejecutable (`../scripts/project_detector.py`). |
+| Script Dependabot | Resuelto automáticamente relativo al ejecutable (`../scripts/dependabot_runner.py`). |
 
 ---
 
@@ -88,7 +91,7 @@ Estos componentes son necesarios independientemente del tipo de proyecto:
 | **SDK/Runtime necesario** | **.NET SDK**. La versión **debe coincidir** con el `TargetFramework` del `.csproj` del proyecto. |
 | **Instalación del SDK** | `sudo apt install dotnet-sdk-<version>` (Ubuntu) |
 | **Ecosistema Dependabot** | `nuget` (detectado por `*.csproj` o `packages.config`) |
-| **Configuración especial en ReportBot** | El PATH de .NET se añade en [`bridge.zig:88`](file:///home/frano/my_app/src/bridge.zig#L88) con `export PATH=/home/frano/.dotnet:$PATH` para que CodeQL encuentre el SDK. |
+| **Configuración especial en ReportBot** | La ruta de .NET se configura desde **Settings → Tool Paths → dotnet SDK PATH**. Se añade al PATH al ejecutar los comandos de CodeQL. |
 | **Verificación** | `dotnet --version` y `dotnet --list-sdks` |
 | **Problemas comunes** | <ul><li>**Versión del SDK no coincide con el TargetFramework**: Si el proyecto apunta a `.NET 9.0` pero solo tienes instalado el SDK `8.0`, la compilación fallará. Debes instalar el SDK correcto.</li><li>`.NET SDK` no está en el `PATH` del usuario que ejecuta CodeQL (solucionado con el `export PATH` en el bridge).</li><li>Proyectos con paquetes NuGet que requieren restauración previa (`dotnet restore`).</li></ul> |
 

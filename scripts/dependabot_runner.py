@@ -5,7 +5,7 @@ import subprocess
 import yaml
 import json
 
-def run_dependabot(project_path, ecosystem="npm_and_yarn", directory="/"):
+def run_dependabot(project_path, ecosystem="npm_and_yarn", directory="/", dependabot_cli="dependabot"):
     # If ecosystem is npm_and_yarn and no directory was specifically requested, 
     # check if we should target /frontend as a fallback.
     if directory == "/" and ecosystem == "npm_and_yarn":
@@ -21,7 +21,7 @@ def run_dependabot(project_path, ecosystem="npm_and_yarn", directory="/"):
     
     # Run dependabot
     cmd = [
-        "/home/frano/Programs/dependabotCli/dependabot-cli/dependabot",
+        dependabot_cli,
         "update",
         ecosystem,
         "ElPsk21/repoDummy",
@@ -187,5 +187,6 @@ if __name__ == "__main__":
     project_path = sys.argv[1]
     ecosystem = sys.argv[2] if len(sys.argv) > 2 else "npm_and_yarn"
     directory = sys.argv[3] if len(sys.argv) > 3 else "/"
+    dependabot_cli = sys.argv[4] if len(sys.argv) > 4 else "dependabot"
     
-    run_dependabot(project_path, ecosystem, directory)
+    run_dependabot(project_path, ecosystem, directory, dependabot_cli)

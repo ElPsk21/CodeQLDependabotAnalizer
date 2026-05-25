@@ -27,7 +27,7 @@ graph TD
 1. **Frontend (`frontend/src/App.tsx`)**: Orquesta el inicio de los escaneos asíncronos concurrentes (CodeQL y Dependabot) usando `Promise.allSettled`. Escucha el canal IPC `dependabot-log` para mostrar el progreso en tiempo real al usuario.
 2. **Backend Entrypoint (`src/main.zig`)**: Registra y expone los comandos del puente IPC y proporciona un sistema de captura y persistencia de resultados a través del comando `scan.saveResults`.
 3. **Dependabot Bridge (`src/dependabot_bridge.zig`)**: Controla el ciclo de vida del subproceso de ejecución, procesa el stdout/stderr secuencialmente en tiempo real para emitir eventos de progreso, y parsea la salida devuelta por el script de Python.
-4. **Dependabot Runner (`scripts/dependabot_runner.py`)**: Script wrapper escrito en Python que interactúa directamente con el CLI oficial de Dependabot. Redirecciona logs pesados a `dependabot_scan.log` en el proyecto escaneado, optimiza y parsea el archivo YAML de salida, y extrae de manera resiliente la tabla resumen de vulnerabilidades para retornarla estructurada en JSON.
+4. **Dependabot Runner (`scripts/dependabot_runner.py`)**: Script wrapper escrito en Python que interactúa directamente con el CLI oficial de Dependabot. La ruta del CLI se configura desde **Settings → Tool Paths** (si no se configura, se usa `dependabot` del PATH del sistema). Redirecciona logs pesados a `dependabot_scan.log` en el proyecto escaneado, optimiza y parsea el archivo YAML de salida, y extrae de manera resiliente la tabla resumen de vulnerabilidades para retornarla estructurada en JSON.
 
 ---
 

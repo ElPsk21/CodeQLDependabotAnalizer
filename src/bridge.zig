@@ -4,7 +4,8 @@ const zero_native = @import("zero-native");
 pub const CodeQlBridge = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    codeql_path: []const u8 = "/home/frano/Programs/opt/codeql/codeql",
+    codeql_path: []const u8 = "",
+    dotnet_path: []const u8 = "",
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) CodeQlBridge {
         return .{ .allocator = allocator, .io = io };
@@ -58,6 +59,11 @@ pub const CodeQlBridge = struct {
         const responder = args.responder;
         const allocator = self.allocator;
         
+        // Parse optional codeqlPath and dotnetPath from the original payload stored in the thread args
+        // These come from the frontend Settings if the user configured custom paths
+        const effective_codeql_path: []const u8 = if (self.codeql_path.len > 0) self.codeql_path else "codeql";
+        const effective_dotnet_path: []const u8 = self.dotnet_path;
+        
         defer allocator.free(project_path);
         defer allocator.free(language);
         defer allocator.free(request_id);
@@ -85,10 +91,16 @@ pub const CodeQlBridge = struct {
             std.debug.print("[Debug] Language: {s}\n", .{language});
             std.debug.print("[Debug] DB path: {s}\n", .{db_full_path});
 
-            const cmd = std.fmt.allocPrint(allocator, "export PATH=/home/frano/.dotnet:$PATH && \"{s}\" database create \"{s}\" --source-root \"{s}\" \"{s}\" --overwrite", .{self.codeql_path, db_full_path, project_path, lang_arg}) catch |err| {
-                self.fail(responder, request_id, "OOM creating build command", err) catch {};
-                return;
-            };
+            const cmd = if (effective_dotnet_path.len > 0)
+                std.fmt.allocPrint(allocator, "export PATH={s}:$PATH && \"{s}\" database create \"{s}\" --source-root \"{s}\" \"{s}\" --overwrite", .{effective_dotnet_path, effective_codeql_path, db_full_path, project_path, lang_arg}) catch |err| {
+                    self.fail(responder, request_id, "OOM creating build command", err) catch {};
+                    return;
+                }
+            else
+                std.fmt.allocPrint(allocator, "\"{s}\" database create \"{s}\" --source-root \"{s}\" \"{s}\" --overwrite", .{effective_codeql_path, db_full_path, project_path, lang_arg}) catch |err| {
+                    self.fail(responder, request_id, "OOM creating build command", err) catch {};
+                    return;
+                };
             defer allocator.free(cmd);
 
             const result = std.process.run(allocator, self.io, .{
@@ -143,10 +155,16 @@ pub const CodeQlBridge = struct {
             std.debug.print("[Debug] Analyzing DB at: {s}\n", .{db_full_path});
             std.debug.print("[Debug] Output SARIF at: {s}\n", .{sarif_path});
 
-            const cmd = std.fmt.allocPrint(allocator, "export PATH=/home/frano/.dotnet:$PATH && \"{s}\" database analyze \"{s}\" --format=sarif-latest --output \"{s}\"", .{self.codeql_path, db_full_path, sarif_path}) catch |err| {
-                self.fail(responder, request_id, "OOM creating analyze command", err) catch {};
-                return;
-            };
+            const cmd = if (effective_dotnet_path.len > 0)
+                std.fmt.allocPrint(allocator, "export PATH={s}:$PATH && \"{s}\" database analyze \"{s}\" --format=sarif-latest --output \"{s}\"", .{effective_dotnet_path, effective_codeql_path, db_full_path, sarif_path}) catch |err| {
+                    self.fail(responder, request_id, "OOM creating analyze command", err) catch {};
+                    return;
+                }
+            else
+                std.fmt.allocPrint(allocator, "\"{s}\" database analyze \"{s}\" --format=sarif-latest --output \"{s}\"", .{effective_codeql_path, db_full_path, sarif_path}) catch |err| {
+                    self.fail(responder, request_id, "OOM creating analyze command", err) catch {};
+                    return;
+                };
             defer allocator.free(cmd);
 
             const result = std.process.run(allocator, self.io, .{

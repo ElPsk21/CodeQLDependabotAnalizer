@@ -69,6 +69,70 @@ pub const SystemBridge = struct {
     }
 };
 
+pub const SettingsBridge = struct {
+    codeql_bridge: *bridge.CodeQlBridge,
+    dependabot_bridge_instance: *dependabot_bridge.DependabotBridge,
+    allocator: std.mem.Allocator,
+
+    pub fn updatePaths(context: *anyopaque, invocation: zero_native.bridge.Invocation, responder: zero_native.bridge.AsyncResponder) anyerror!void {
+        const self: *SettingsBridge = @ptrCast(@alignCast(context));
+        const payload = invocation.request.payload;
+
+        // Parse codeqlPath
+        const cql_key = "\"codeqlPath\":\"";
+        if (std.mem.indexOf(u8, payload, cql_key)) |idx| {
+            const start = idx + cql_key.len;
+            if (std.mem.indexOfScalarPos(u8, payload, start, '"')) |end| {
+                const value = payload[start..end];
+                if (value.len > 0) {
+                    if (self.codeql_bridge.codeql_path.len > 0) {
+                        self.allocator.free(self.codeql_bridge.codeql_path);
+                    }
+                    const duped = try self.allocator.dupe(u8, value);
+                    self.codeql_bridge.codeql_path = duped;
+                    std.debug.print("[Settings] CodeQL path set to: {s}\n", .{duped});
+                }
+            }
+        }
+
+        // Parse dotnetPath
+        const dot_key = "\"dotnetPath\":\"";
+        if (std.mem.indexOf(u8, payload, dot_key)) |idx| {
+            const start = idx + dot_key.len;
+            if (std.mem.indexOfScalarPos(u8, payload, start, '"')) |end| {
+                const value = payload[start..end];
+                if (value.len > 0) {
+                    if (self.codeql_bridge.dotnet_path.len > 0) {
+                        self.allocator.free(self.codeql_bridge.dotnet_path);
+                    }
+                    const duped = try self.allocator.dupe(u8, value);
+                    self.codeql_bridge.dotnet_path = duped;
+                    std.debug.print("[Settings] dotnet path set to: {s}\n", .{duped});
+                }
+            }
+        }
+
+        // Parse dependabotCliPath
+        const dep_key = "\"dependabotCliPath\":\"";
+        if (std.mem.indexOf(u8, payload, dep_key)) |idx| {
+            const start = idx + dep_key.len;
+            if (std.mem.indexOfScalarPos(u8, payload, start, '"')) |end| {
+                const value = payload[start..end];
+                if (value.len > 0) {
+                    if (self.dependabot_bridge_instance.dependabot_cli_path.len > 0) {
+                        self.allocator.free(self.dependabot_bridge_instance.dependabot_cli_path);
+                    }
+                    const duped = try self.allocator.dupe(u8, value);
+                    self.dependabot_bridge_instance.dependabot_cli_path = duped;
+                    std.debug.print("[Settings] Dependabot CLI path set to: {s}\n", .{duped});
+                }
+            }
+        }
+
+        try responder.success(invocation.request.id, "{\"ok\":true}");
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
@@ -81,11 +145,16 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var system_bridge = SystemBridge.init(allocator, init.io);
+    var settings_bridge = SettingsBridge{
+        .codeql_bridge = &app_instance.codeql_bridge,
+        .dependabot_bridge_instance = &app_instance.dependabot_bridge,
+        .allocator = allocator,
+    };
 
     const cq_disp = bridge.getDispatcher(allocator, &app_instance.codeql_bridge);
     
-    var handlers = allocator.alloc(zero_native.bridge.AsyncHandler, cq_disp.async_registry.handlers.len + 3) catch @panic("OOM");
-    var commands = allocator.alloc(zero_native.bridge.CommandPolicy, cq_disp.policy.commands.len + 3) catch @panic("OOM");
+    var handlers = allocator.alloc(zero_native.bridge.AsyncHandler, cq_disp.async_registry.handlers.len + 4) catch @panic("OOM");
+    var commands = allocator.alloc(zero_native.bridge.CommandPolicy, cq_disp.policy.commands.len + 4) catch @panic("OOM");
 
     @memcpy(handlers[0..cq_disp.async_registry.handlers.len], cq_disp.async_registry.handlers);
     handlers[cq_disp.async_registry.handlers.len] = .{
@@ -103,11 +172,17 @@ pub fn main(init: std.process.Init) !void {
         .context = &app_instance.project_detector_bridge,
         .invoke_fn = project_detector_bridge.ProjectDetectorBridge.detectStack,
     };
+    handlers[cq_disp.async_registry.handlers.len + 3] = .{
+        .name = "settings.updatePaths",
+        .context = &settings_bridge,
+        .invoke_fn = SettingsBridge.updatePaths,
+    };
 
     @memcpy(commands[0..cq_disp.policy.commands.len], cq_disp.policy.commands);
     commands[cq_disp.policy.commands.len] = .{ .name = "dependabot.runScan", .origins = &.{"*"} };
     commands[cq_disp.policy.commands.len + 1] = .{ .name = "scan.saveResults", .origins = &.{"*"} };
     commands[cq_disp.policy.commands.len + 2] = .{ .name = "project.detectStack", .origins = &.{"*"} };
+    commands[cq_disp.policy.commands.len + 3] = .{ .name = "settings.updatePaths", .origins = &.{"*"} };
 
     const combined_dispatcher = zero_native.BridgeDispatcher{
         .policy = .{ .enabled = true, .commands = commands },
@@ -133,4 +208,19 @@ pub fn main(init: std.process.Init) !void {
             },
         },
     }, init);
+
+    // Free all resources to prevent memory leaks at shutdown
+    allocator.free(cq_disp.async_registry.handlers);
+    allocator.free(handlers);
+    allocator.free(commands);
+
+    if (app_instance.codeql_bridge.codeql_path.len > 0) {
+        allocator.free(app_instance.codeql_bridge.codeql_path);
+    }
+    if (app_instance.codeql_bridge.dotnet_path.len > 0) {
+        allocator.free(app_instance.codeql_bridge.dotnet_path);
+    }
+    if (app_instance.dependabot_bridge.dependabot_cli_path.len > 0) {
+        allocator.free(app_instance.dependabot_bridge.dependabot_cli_path);
+    }
 }

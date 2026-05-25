@@ -820,6 +820,93 @@ button.nav-item {
   color: #94a3b8;
 }
 
+.settings-path-group {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.settings-browse-btn {
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-browse-btn:hover {
+  background: #2563eb;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+}
+
+.settings-browse-btn:active {
+  transform: translateY(0);
+}
+
+.settings-save-btn {
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  padding: 12px 28px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.2);
+}
+
+.settings-save-btn:hover {
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(59, 130, 246, 0.35);
+}
+
+.settings-save-btn:active {
+  transform: translateY(0);
+}
+
+.settings-save-btn.saved {
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  box-shadow: 0 2px 8px rgba(34, 197, 94, 0.3);
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 8px;
+  padding-top: 20px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.settings-saved-msg {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #16a34a;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
 .install-banner {
   margin-top: 20px;
   padding: 20px;
@@ -1083,5 +1170,88 @@ button.nav-item {
 .version-arrow {
   color: #94a3b8;
   margin: 0 8px;
+}
+
+/* --- Global Buttons --- */
+.btn-primary {
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 20px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 2px 4px rgba(59, 130, 246, 0.15);
+  transition: all 0.2s ease;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+}
+
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 20px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s ease;
+}
+
+.btn-secondary:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.resolver-btn {
+  background: linear-gradient(135deg, #6366f1, #4f46e5); /* Indigo gradient */
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 20px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 4px 6px -1px rgba(99, 102, 241, 0.15), 0 2px 4px -1px rgba(99, 102, 241, 0.1);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.resolver-btn:hover {
+  background: linear-gradient(135deg, #4f46e5, #4338ca);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 12px -2px rgba(99, 102, 241, 0.3), 0 3px 6px -3px rgba(99, 102, 241, 0.2);
+}
+
+.resolver-btn:active {
+  transform: translateY(1px);
+  box-shadow: 0 2px 4px -1px rgba(99, 102, 241, 0.15);
+}
+
+.resolver-btn svg {
+  transition: transform 0.2s ease;
+}
+
+.resolver-btn:hover svg {
+  transform: rotate(15deg) scale(1.1);
 }
 

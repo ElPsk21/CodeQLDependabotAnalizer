@@ -15,7 +15,7 @@ El proceso comienza en el componente principal de React:
 La lógica central que orquesta a CodeQL reside en la estructura `CodeQlBridge`:
 - **Archivo**: [src/bridge.zig](src/bridge.zig)
 - **Componentes Clave**:
-    - **`CodeQlBridge`**: Estructura que almacena la ruta del ejecutable de CodeQL (por defecto en `/.../Programs/opt/codeql/codeql`).
+    - **`CodeQlBridge`**: Estructura que almacena la ruta del ejecutable de CodeQL (configurable desde **Settings → Tool Paths**).
     - **`runScan`**: Handler asíncrono que inicia un hilo separado para no bloquear la aplicación mientras se analiza el código.
 
 ## 3. Flujo de Ejecución Sequencial
