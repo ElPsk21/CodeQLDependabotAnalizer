@@ -5,16 +5,17 @@ import subprocess
 import yaml
 import json
 
-def run_dependabot(project_path):
-    # Determine the directory flag for dependabot
-    sub_dir = "/"
-    if os.path.exists(os.path.join(project_path, "frontend", "package.json")):
-        sub_dir = "/frontend"
-    elif not os.path.exists(os.path.join(project_path, "package.json")):
-        print(json.dumps({"error": "No package.json found in root or frontend/"}))
-        sys.exit(1)
+def run_dependabot(project_path, ecosystem="npm_and_yarn", directory="/"):
+    # If ecosystem is npm_and_yarn and no directory was specifically requested, 
+    # check if we should target /frontend as a fallback.
+    if directory == "/" and ecosystem == "npm_and_yarn":
+        if os.path.exists(os.path.join(project_path, "frontend", "package.json")):
+            directory = "/frontend"
+        elif not os.path.exists(os.path.join(project_path, "package.json")):
+            print(json.dumps({"error": "No package.json found in root or frontend/"}))
+            sys.exit(1)
 
-    output_yml = os.path.join(project_path, "dependabot_output.yml")
+    output_yml = os.path.join(project_path, f"dependabot_output_{ecosystem}.yml")
     if os.path.exists(output_yml):
         os.remove(output_yml)
     
@@ -22,10 +23,10 @@ def run_dependabot(project_path):
     cmd = [
         "/home/frano/Programs/dependabotCli/dependabot-cli/dependabot",
         "update",
-        "npm_and_yarn",
+        ecosystem,
         "ElPsk21/repoDummy",
         "--local", project_path,
-        "-d", sub_dir,
+        "-d", directory,
         "-o", output_yml
     ]
     
@@ -183,4 +184,8 @@ if __name__ == "__main__":
         print(json.dumps({"error": "Project path required"}))
         sys.exit(1)
     
-    run_dependabot(sys.argv[1])
+    project_path = sys.argv[1]
+    ecosystem = sys.argv[2] if len(sys.argv) > 2 else "npm_and_yarn"
+    directory = sys.argv[3] if len(sys.argv) > 3 else "/"
+    
+    run_dependabot(project_path, ecosystem, directory)

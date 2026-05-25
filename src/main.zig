@@ -3,6 +3,7 @@ const runner = @import("runner");
 const zero_native = @import("zero-native");
 const bridge = @import("bridge.zig");
 const dependabot_bridge = @import("dependabot_bridge.zig");
+const project_detector_bridge = @import("project_detector_bridge.zig");
 
 pub const panic = std.debug.FullPanic(zero_native.debug.capturePanic);
 
@@ -11,6 +12,7 @@ const App = struct {
     io: std.Io,
     codeql_bridge: bridge.CodeQlBridge,
     dependabot_bridge: dependabot_bridge.DependabotBridge,
+    project_detector_bridge: project_detector_bridge.ProjectDetectorBridge,
 
     fn app(self: *@This()) zero_native.App {
         return .{
@@ -75,14 +77,15 @@ pub fn main(init: std.process.Init) !void {
         .io = init.io,
         .codeql_bridge = bridge.CodeQlBridge.init(allocator, init.io),
         .dependabot_bridge = dependabot_bridge.DependabotBridge.init(allocator, init.io),
+        .project_detector_bridge = project_detector_bridge.ProjectDetectorBridge.init(allocator, init.io),
     };
 
     var system_bridge = SystemBridge.init(allocator, init.io);
 
     const cq_disp = bridge.getDispatcher(allocator, &app_instance.codeql_bridge);
     
-    var handlers = allocator.alloc(zero_native.bridge.AsyncHandler, cq_disp.async_registry.handlers.len + 2) catch @panic("OOM");
-    var commands = allocator.alloc(zero_native.bridge.CommandPolicy, cq_disp.policy.commands.len + 2) catch @panic("OOM");
+    var handlers = allocator.alloc(zero_native.bridge.AsyncHandler, cq_disp.async_registry.handlers.len + 3) catch @panic("OOM");
+    var commands = allocator.alloc(zero_native.bridge.CommandPolicy, cq_disp.policy.commands.len + 3) catch @panic("OOM");
 
     @memcpy(handlers[0..cq_disp.async_registry.handlers.len], cq_disp.async_registry.handlers);
     handlers[cq_disp.async_registry.handlers.len] = .{
@@ -95,10 +98,16 @@ pub fn main(init: std.process.Init) !void {
         .context = &system_bridge,
         .invoke_fn = SystemBridge.saveResults,
     };
+    handlers[cq_disp.async_registry.handlers.len + 2] = .{
+        .name = "project.detectStack",
+        .context = &app_instance.project_detector_bridge,
+        .invoke_fn = project_detector_bridge.ProjectDetectorBridge.detectStack,
+    };
 
     @memcpy(commands[0..cq_disp.policy.commands.len], cq_disp.policy.commands);
     commands[cq_disp.policy.commands.len] = .{ .name = "dependabot.runScan", .origins = &.{"*"} };
     commands[cq_disp.policy.commands.len + 1] = .{ .name = "scan.saveResults", .origins = &.{"*"} };
+    commands[cq_disp.policy.commands.len + 2] = .{ .name = "project.detectStack", .origins = &.{"*"} };
 
     const combined_dispatcher = zero_native.BridgeDispatcher{
         .policy = .{ .enabled = true, .commands = commands },

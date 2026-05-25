@@ -12,6 +12,8 @@ pub const DependabotBridge = struct {
     const ScanArgs = struct {
         self: *DependabotBridge,
         path: []const u8,
+        ecosystem: []const u8,
+        directory: []const u8,
         id: []const u8,
         responder: zero_native.bridge.AsyncResponder,
     };
@@ -26,11 +28,31 @@ pub const DependabotBridge = struct {
         const end_index = std.mem.indexOfScalarPos(u8, invocation.request.payload, path_start, '"') orelse return error.InvalidRequest;
         const project_path = invocation.request.payload[path_start..end_index];
 
+        var ecosystem: []const u8 = "npm_and_yarn";
+        const eco_key = "\"ecosystem\":\"";
+        if (std.mem.indexOf(u8, invocation.request.payload, eco_key)) |e_start_idx| {
+            const e_start = e_start_idx + eco_key.len;
+            if (std.mem.indexOfScalarPos(u8, invocation.request.payload, e_start, '"')) |e_end| {
+                ecosystem = invocation.request.payload[e_start..e_end];
+            }
+        }
+
+        var directory: []const u8 = "/";
+        const dir_key = "\"directory\":\"";
+        if (std.mem.indexOf(u8, invocation.request.payload, dir_key)) |d_start_idx| {
+            const d_start = d_start_idx + dir_key.len;
+            if (std.mem.indexOfScalarPos(u8, invocation.request.payload, d_start, '"')) |d_end| {
+                directory = invocation.request.payload[d_start..d_end];
+            }
+        }
+
         const project_path_copy = try self.allocator.dupe(u8, project_path);
+        const ecosystem_copy = try self.allocator.dupe(u8, ecosystem);
+        const directory_copy = try self.allocator.dupe(u8, directory);
         const request_id_copy = try self.allocator.dupe(u8, invocation.request.id);
 
         const args = try self.allocator.create(ScanArgs);
-        args.* = .{ .self = self, .path = project_path_copy, .id = request_id_copy, .responder = responder };
+        args.* = .{ .self = self, .path = project_path_copy, .ecosystem = ecosystem_copy, .directory = directory_copy, .id = request_id_copy, .responder = responder };
 
         const thread = try std.Thread.spawn(.{}, runScanInternal, .{args});
         thread.detach();
@@ -39,25 +61,24 @@ pub const DependabotBridge = struct {
     fn runScanInternal(args: *ScanArgs) void {
         const self = args.self;
         const project_path = args.path;
+        const ecosystem = args.ecosystem;
+        const directory = args.directory;
         const request_id = args.id;
         const responder = args.responder;
         const allocator = self.allocator;
         
         defer allocator.free(project_path);
+        defer allocator.free(ecosystem);
+        defer allocator.free(directory);
         defer allocator.free(request_id);
         defer allocator.destroy(args);
 
         self.emitLog(responder, "[Dependabot] Starting dependency scan...") catch {};
 
-        // Run python wrapper script
-        // We assume the script is at "scripts/dependabot_runner.py" relative to the CWD
-        // But since CWD might vary, we can use absolute or relative path safely if we assume CWD is project root.
-        // The project is at /home/frano/my_app, and runner.zig is usually executed from there.
-        // Alternatively, use absolute path: "/home/frano/my_app/scripts/dependabot_runner.py"
         const script_path = "/home/frano/my_app/scripts/dependabot_runner.py";
 
         const result = std.process.run(allocator, self.io, .{
-            .argv = &.{ script_path, project_path },
+            .argv = &.{ script_path, project_path, ecosystem, directory },
         }) catch |err| {
             std.debug.print("[Error] Failed to start Dependabot script: {s}\n", .{@errorName(err)});
             self.fail(responder, request_id, "Failed to run dependabot script", err) catch {};

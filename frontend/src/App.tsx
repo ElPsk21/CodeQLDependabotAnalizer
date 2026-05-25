@@ -46,6 +46,11 @@ interface ToolStatus {
   codeqlVersion: string;
 }
 
+interface DetectedStack {
+  languages: { name: string; code_lines: number; selected: boolean }[];
+  ecosystems: { name: string; manifest: string; directory: string; selected: boolean }[];
+}
+
 type Page = "dashboard" | "settings";
 
 export default function App() {
@@ -62,6 +67,11 @@ export default function App() {
   const [depSearch, setDepSearch] = useState("");
   const [depSort, setDepSort] = useState<"name" | "action">("name");
 
+  // State for project detection
+  const [detectedStack, setDetectedStack] = useState<DetectedStack | null>(null);
+  const [isDetecting, setIsDetecting] = useState(false);
+  const [currentProjectPath, setCurrentProjectPath] = useState<string | null>(null);
+
   // States for parsed data
   const [codeQlAlerts, setCodeQlAlerts] = useState<CodeQlAlert[]>([]);
   const [dependabotAlerts, setDependabotAlerts] = useState<DependabotAlert[]>([]);
@@ -72,6 +82,7 @@ export default function App() {
   const [selectedAlert, setSelectedAlert] = useState<CodeQlAlert | DependabotAlert | null>(null);
   const [isLoadingSnippet, setIsLoadingSnippet] = useState(false);
   const [snippetCache, setSnippetCache] = useState<Record<string, string>>({});
+  const [scanWarnings, setScanWarnings] = useState<string[]>([]);
 
   useEffect(() => {
     if (selectedAlert && selectedAlert.type === "codeql" && scanStats) {
@@ -155,207 +166,251 @@ export default function App() {
       });
 
       if (!result || result.length === 0) return;
-      const projectPath = result[0];
+      let projectPath: string = result[0];
+      
+      // Normalize Windows paths to WSL-compatible paths
+      // e.g. "C:\Users\foo" -> "/mnt/c/Users/foo"
+      if (projectPath.length >= 2 && projectPath[1] === ':' && /^[a-zA-Z]$/.test(projectPath[0])) {
+        const driveLetter = projectPath[0].toLowerCase();
+        const rest = projectPath.substring(2).replace(/\\/g, '/');
+        projectPath = `/mnt/${driveLetter}${rest}`;
+        console.debug(`[JS] handleLocalScan: Converted Windows path to WSL: ${projectPath}`);
+      } else if (projectPath.includes('\\')) {
+        projectPath = projectPath.replace(/\\/g, '/');
+        console.debug(`[JS] handleLocalScan: Replaced backslashes in path: ${projectPath}`);
+      }
+      
+      setCurrentProjectPath(projectPath);
 
-      // 2. Start scan
-      setIsScanning(true);
-      setScanLogs([`[Scan] Initializing scan for: ${projectPath}`]);
-      setScanProgress(5);
-
-      // Listen for progress logs
-      const removeListener = (window as any).zero.on("codeql-log", (detail: any) => {
-        setScanLogs(prev => [...prev, detail.message]);
-      });
-      const removeDependabotListener = (window as any).zero.on("dependabot-log", (detail: any) => {
-        setScanLogs(prev => [...prev, detail.message]);
-      });
+      // 2. Run detection
+      console.debug(`[JS] handleLocalScan: Iniciando preescaneo del proyecto en: ${projectPath}`);
+      setIsDetecting(true);
+      setScanError(null);
 
       try {
-        setScanError(null);
-        const startTime = Date.now();
-        console.log("[JS] Starting parallel invocations: codeql.runScan & dependabot.runScan");
+        console.debug("[JS] handleLocalScan: Invocando project.detectStack...");
+        const detectResult = await (window as any).zero.invoke("project.detectStack", { path: projectPath });
+        console.debug("[JS] handleLocalScan: Resultado raw recibido:", detectResult);
         
-        const codeqlPromise = (window as any).zero.invoke("codeql.runScan", { path: projectPath });
-        const dependabotPromise = (window as any).zero.invoke("dependabot.runScan", { path: projectPath });
-
-        const [codeqlResult, dependabotResult] = await Promise.allSettled([codeqlPromise, dependabotPromise]);
-        const endTime = Date.now();
-        
-        let alerts: CodeQlAlert[] = [];
-        let depAlerts: DependabotAlert[] = [];
-        let codeqlError: string | null = null;
-        let dependabotError: string | null = null;
-
-        // Process CodeQL
-        if (codeqlResult.status === "fulfilled") {
-          let rawResponse = codeqlResult.value;
-          let sarifRaw: string;
-          
-          if (typeof rawResponse === "string") {
-            sarifRaw = rawResponse;
-          } else if (rawResponse instanceof Uint8Array || (rawResponse && typeof rawResponse === "object" && "buffer" in rawResponse)) {
-            sarifRaw = new TextDecoder().decode(rawResponse as any);
-          } else {
-            sarifRaw = JSON.stringify(rawResponse);
-          }
-
-          if (sarifRaw && sarifRaw.trim().length > 0) {
-            try {
-              const sarif = JSON.parse(sarifRaw);
-              sarif.runs?.forEach((run: any) => {
-                run.results?.forEach((res: any, idx: number) => {
-                  const loc = res.locations?.[0]?.physicalLocation;
-                  const region = loc?.region;
-                  const relativePath = loc?.artifactLocation?.uri || "unknown";
-                  alerts.push({
-                    type: "codeql",
-                    id: `codeql-${idx}`,
-                    rule: res.ruleId,
-                    description: res.message.text,
-                    severity: res.level === "error" ? "error" : "warning",
-                    location: relativePath,
-                    fullPath: projectPath.endsWith('/') ? `${projectPath}${relativePath}` : `${projectPath}/${relativePath}`,
-                    startLine: region?.startLine || 0,
-                    endLine: region?.endLine || region?.startLine || 0,
-                  });
-                });
-              });
-            } catch (e: any) {
-              codeqlError = `Failed to parse CodeQL: ${e.message}`;
-            }
-          }
+        let detectData;
+        if (typeof detectResult === "string") {
+          detectData = JSON.parse(detectResult);
+        } else if (detectResult instanceof Uint8Array || detectResult instanceof ArrayBuffer) {
+          detectData = JSON.parse(new TextDecoder().decode(detectResult as any));
+        } else if (detectResult && typeof detectResult === "object" && "buffer" in detectResult) {
+          detectData = JSON.parse(new TextDecoder().decode(new Uint8Array(detectResult.buffer as ArrayBuffer)));
         } else {
-          codeqlError = codeqlResult.reason || "CodeQL Scan Failed";
+          detectData = detectResult;
         }
 
-        // Process Dependabot
-        if (dependabotResult.status === "fulfilled") {
-           try {
-              const rawValue = dependabotResult.value;
-              console.log("[JS] Dependabot raw value type:", typeof rawValue, "constructor:", rawValue?.constructor?.name);
-              
-              let depData: any;
-              
-              if (typeof rawValue === "string") {
-                // String response — parse as JSON
-                console.log("[JS] Dependabot raw string (first 300):", rawValue.substring(0, 300));
-                depData = JSON.parse(rawValue);
-              } else if (rawValue instanceof Uint8Array || rawValue instanceof ArrayBuffer) {
-                // Binary response — decode then parse
-                const depRaw = new TextDecoder().decode(rawValue);
-                console.log("[JS] Dependabot decoded string (first 300):", depRaw.substring(0, 300));
-                depData = JSON.parse(depRaw);
-              } else if (rawValue && typeof rawValue === "object") {
-                // Already a parsed object/array from the bridge
-                console.log("[JS] Dependabot value is already an object:", JSON.stringify(rawValue).substring(0, 300));
-                // Check if it has a buffer-like property (e.g. {buffer: ArrayBuffer, ...})
-                if ('buffer' in rawValue && rawValue.buffer instanceof ArrayBuffer) {
-                  const depRaw = new TextDecoder().decode(new Uint8Array(rawValue.buffer, rawValue.byteOffset, rawValue.byteLength));
-                  console.log("[JS] Dependabot decoded from buffer (first 300):", depRaw.substring(0, 300));
-                  depData = JSON.parse(depRaw);
-                } else if ('0' in rawValue && typeof rawValue[0] === 'number') {
-                  // Array-like object of bytes {0: 91, 1: 123, ...} — convert to Uint8Array
-                  const len = Object.keys(rawValue).filter(k => /^\d+$/.test(k)).length;
-                  const bytes = new Uint8Array(len);
-                  for (let i = 0; i < len; i++) bytes[i] = rawValue[i];
-                  const depRaw = new TextDecoder().decode(bytes);
-                  console.log("[JS] Dependabot decoded from byte-object (first 300):", depRaw.substring(0, 300));
-                  depData = JSON.parse(depRaw);
-                } else {
-                  // The bridge already parsed the JSON for us — use directly
-                  depData = rawValue;
-                }
-              } else {
-                throw new Error(`Unexpected dependabot result type: ${typeof rawValue}`);
-              }
-              
-              console.log("[JS] Dependabot parsed data type:", typeof depData, "isArray:", Array.isArray(depData));
-              
-              if (depData && depData.error) {
-                 dependabotError = depData.error;
-                 setScanLogs(prev => [...prev, `[Dependabot] Error: ${depData.error}`]);
-              } else if (Array.isArray(depData)) {
-                 console.log("[JS] Dependabot array length:", depData.length);
-                 depData.forEach((call: any, idx: number) => {
-                    if (call.type === "create_pull_request" && call.expect && call.expect.data) {
-                       const deps = call.expect.data.dependencies || [];
-                       deps.forEach((d: any, dIdx: number) => {
-                           depAlerts.push({
-                             type: "dependabot",
-                             id: `dep-${idx}-${dIdx}`,
-                             package: d.name,
-                             action: call.type === "create_pull_request" ? "created" : "updated",
-                             description: `Update ${d.name} from ${d['previous-version']} to ${d.version}`,
-                             severity: "high",
-                             versionRange: d['previous-version'] || "unknown",
-                             patchedVersion: d.version || "unknown"
-                          });
-                       });
-                    }
-                 });
-                 console.log("[JS] Dependabot alerts parsed:", depAlerts.length);
-              } else {
-                 console.log("[JS] Dependabot data is neither error nor array:", depData);
-              }
-           } catch (e: any) {
-              console.error("[JS] Failed to parse Dependabot result:", e);
-              console.error("[JS] Raw value was:", dependabotResult.value);
-              dependabotError = `Failed to parse Dependabot: ${e.message}`;
-           }
+        console.debug("[JS] handleLocalScan: Datos parseados de detección:", detectData);
+
+        if (detectData.error) {
+          console.debug("[JS] handleLocalScan: Error detectado en la respuesta:", detectData.error);
+          setScanError(`Detection failed: ${detectData.error}`);
         } else {
-          dependabotError = dependabotResult.reason || "Dependabot Scan Failed";
+          console.debug("[JS] handleLocalScan: Stack detectado, actualizando interfaz gráfica.");
+          setDetectedStack(detectData);
         }
-
-        if (codeqlError && dependabotError) {
-          throw new Error(`Both scans failed: CodeQL (${codeqlError}), Dependabot (${dependabotError})`);
-        }
-
-        // Calculate stats
-        const stats: ScanStats = {
-          total: alerts.length + depAlerts.length,
-          critical: alerts.filter(a => a.severity === "error").length,
-          high: alerts.filter(a => a.severity === "warning").length + depAlerts.length,
-          medium: 0,
-          low: 0,
-          duration: Math.round((endTime - startTime) / 1000),
-          projectPath: projectPath
-        };
-
-        setDependabotAlerts(depAlerts);
-        setScanStats(stats);
-        setCodeQlAlerts(alerts);
-        
-        // Save combined results to file via bridge (optional but good practice)
-        try {
-          await (window as any).zero.invoke("scan.saveResults", {
-            path: projectPath,
-            results: {
-              codeql: alerts,
-              dependabot: depAlerts,
-              stats: stats,
-              errors: { codeql: codeqlError, dependabot: dependabotError }
-            }
-          });
-          setScanLogs(prev => [...prev, `[Scan] Results saved to ${projectPath}/scan_results.json`]);
-        } catch (e) {
-          console.error("Failed to save results to file", e);
-        }
-
-        console.log(`[JS] Scan complete. Switching UI...`);
-        setIsLoaded(true);
       } catch (err: any) {
-        console.error("[JS] Error processing scan results:", err);
-        const errMsg = err.message || String(err);
-        setScanError(errMsg);
-        setScanLogs(prev => [...prev, `[Error] ${errMsg}`]);
+        console.error("Detection error:", err);
+        setScanError(`Detection failed: ${err.message || String(err)}`);
       } finally {
-        removeListener();
-        removeDependabotListener();
-        setIsScanning(false);
-        setScanProgress(0);
+        setIsDetecting(false);
       }
     } catch (err: any) {
       console.error("Scan failed", err);
+    }
+  };
+
+  const startAnalysis = async () => {
+    if (!currentProjectPath || !detectedStack) return;
+
+    console.debug(`[JS] startAnalysis: Comenzando escaneo para el proyecto en: ${currentProjectPath}`);
+    console.debug(`[JS] startAnalysis: Opciones seleccionadas:`, detectedStack);
+
+    setIsScanning(true);
+    setScanLogs([`[Scan] Initializing multi-scan for: ${currentProjectPath}`]);
+    setScanProgress(5);
+
+    const removeListener = (window as any).zero.on("codeql-log", (detail: any) => {
+      setScanLogs(prev => [...prev, detail.message]);
+    });
+    const removeDependabotListener = (window as any).zero.on("dependabot-log", (detail: any) => {
+      setScanLogs(prev => [...prev, detail.message]);
+    });
+
+    try {
+      setScanError(null);
+      const startTime = Date.now();
+      
+      const promises: Promise<any>[] = [];
+      const codeqlLangs = detectedStack.languages.filter(l => l.selected).map(l => l.name);
+      const depEcos = detectedStack.ecosystems.filter(e => e.selected);
+
+      codeqlLangs.forEach(lang => {
+        console.debug(`[JS] startAnalysis: Preparando CodeQL para lenguaje: ${lang}`);
+        promises.push((window as any).zero.invoke("codeql.runScan", { path: currentProjectPath, language: lang }).then((res: any) => ({ type: 'codeql', lang, result: res })));
+      });
+      depEcos.forEach(eco => {
+        console.debug(`[JS] startAnalysis: Preparando Dependabot para ecosistema: ${eco.name} en ${eco.directory}`);
+        promises.push((window as any).zero.invoke("dependabot.runScan", { path: currentProjectPath, ecosystem: eco.name, directory: eco.directory }).then((res: any) => ({ type: 'dependabot', eco, result: res })));
+      });
+
+      console.debug(`[JS] startAnalysis: Lanzando ${promises.length} invocaciones en paralelo (CodeQL y Dependabot).`);
+      const results = await Promise.allSettled(promises);
+      const endTime = Date.now();
+      
+      let alerts: CodeQlAlert[] = [];
+      let depAlerts: DependabotAlert[] = [];
+      let errors: string[] = [];
+
+      results.forEach((res, index) => {
+        console.debug(`[JS] startAnalysis: Procesando resultado de la promesa ${index}`, res);
+        
+        if (res.status === "rejected") {
+          console.debug(`[JS] startAnalysis: Tarea ${index} rechazada:`, res.reason);
+          errors.push(`Task ${index} failed: ${res.reason}`);
+          return;
+        }
+
+        const task = res.value;
+        const rawValue = task.result;
+
+        if (task.type === 'codeql') {
+          let sarifRaw = "";
+          if (typeof rawValue === "string") sarifRaw = rawValue;
+          else if (rawValue instanceof Uint8Array || (rawValue && typeof rawValue === "object" && "buffer" in rawValue)) sarifRaw = new TextDecoder().decode(rawValue as any);
+          else sarifRaw = JSON.stringify(rawValue);
+
+          if (sarifRaw && sarifRaw.trim().length > 0) {
+            try {
+              const parsed = JSON.parse(sarifRaw);
+              
+              // Check if the bridge returned an error JSON instead of SARIF
+              if (parsed.error) {
+                console.debug(`[JS] CodeQL (${task.lang}) returned error:`, parsed.error);
+                errors.push(`CodeQL (${task.lang}): ${parsed.error}`);
+              } else if (parsed.runs) {
+                // Valid SARIF response
+                parsed.runs?.forEach((run: any) => {
+                  run.results?.forEach((r: any, idx: number) => {
+                    const loc = r.locations?.[0]?.physicalLocation;
+                    const region = loc?.region;
+                    const relativePath = loc?.artifactLocation?.uri || "unknown";
+                    alerts.push({
+                      type: "codeql",
+                      id: `codeql-${task.lang}-${idx}`,
+                      rule: r.ruleId,
+                      description: `[${task.lang}] ${r.message.text}`,
+                      severity: r.level === "error" ? "error" : "warning",
+                      location: relativePath,
+                      fullPath: currentProjectPath.endsWith('/') ? `${currentProjectPath}${relativePath}` : `${currentProjectPath}/${relativePath}`,
+                      startLine: region?.startLine || 0,
+                      endLine: region?.endLine || region?.startLine || 0,
+                    });
+                  });
+                });
+              } else {
+                console.debug(`[JS] CodeQL (${task.lang}) returned unexpected JSON:`, parsed);
+                errors.push(`CodeQL (${task.lang}): Unexpected response format`);
+              }
+            } catch (e: any) {
+              errors.push(`Failed to parse CodeQL (${task.lang}): ${e.message}`);
+            }
+          }
+        } else if (task.type === 'dependabot') {
+          try {
+            let depData: any;
+            if (typeof rawValue === "string") depData = JSON.parse(rawValue);
+            else if (rawValue instanceof Uint8Array || rawValue instanceof ArrayBuffer) depData = JSON.parse(new TextDecoder().decode(rawValue));
+            else if (rawValue && typeof rawValue === "object") {
+              if ('buffer' in rawValue && rawValue.buffer instanceof ArrayBuffer) {
+                depData = JSON.parse(new TextDecoder().decode(new Uint8Array(rawValue.buffer, rawValue.byteOffset, rawValue.byteLength)));
+              } else if ('0' in rawValue && typeof rawValue[0] === 'number') {
+                const len = Object.keys(rawValue).filter(k => /^\d+$/.test(k)).length;
+                const bytes = new Uint8Array(len);
+                for (let i = 0; i < len; i++) bytes[i] = rawValue[i];
+                depData = JSON.parse(new TextDecoder().decode(bytes));
+              } else depData = rawValue;
+            }
+
+            if (depData && depData.error) {
+               errors.push(`Dependabot Error (${task.eco.name}): ${depData.error}`);
+            } else if (Array.isArray(depData)) {
+               depData.forEach((call: any, idx: number) => {
+                  if (call.type === "create_pull_request" && call.expect && call.expect.data) {
+                     const deps = call.expect.data.dependencies || [];
+                     deps.forEach((d: any, dIdx: number) => {
+                         depAlerts.push({
+                           type: "dependabot",
+                           id: `dep-${task.eco.name}-${idx}-${dIdx}`,
+                           package: d.name,
+                           action: call.type === "create_pull_request" ? "created" : "updated",
+                           description: `Update ${d.name} from ${d['previous-version']} to ${d.version}`,
+                           severity: "high",
+                           versionRange: d['previous-version'] || "unknown",
+                           patchedVersion: d.version || "unknown"
+                        });
+                     });
+                  }
+               });
+            }
+          } catch (e: any) {
+             errors.push(`Failed to parse Dependabot (${task.eco.name}): ${e.message}`);
+          }
+        }
+      });
+
+      if (errors.length === promises.length && promises.length > 0) {
+        throw new Error(`All scans failed:\n${errors.join('\n')}`);
+      }
+
+      if (errors.length > 0) {
+        setScanLogs(prev => [...prev, `[Warning] Some scans had issues:`, ...errors]);
+        setScanWarnings(errors);
+      } else {
+        setScanWarnings([]);
+      }
+
+      const stats: ScanStats = {
+        total: alerts.length + depAlerts.length,
+        critical: alerts.filter(a => a.severity === "error").length,
+        high: alerts.filter(a => a.severity === "warning").length + depAlerts.length,
+        medium: 0,
+        low: 0,
+        duration: Math.round((endTime - startTime) / 1000),
+        projectPath: currentProjectPath
+      };
+
+      setDependabotAlerts(depAlerts);
+      setScanStats(stats);
+      setCodeQlAlerts(alerts);
+      
+      try {
+        await (window as any).zero.invoke("scan.saveResults", {
+          path: currentProjectPath,
+          results: {
+            codeql: alerts,
+            dependabot: depAlerts,
+            stats: stats,
+            errors: errors
+          }
+        });
+        setScanLogs(prev => [...prev, `[Scan] Results saved to ${currentProjectPath}/scan_results.json`]);
+      } catch (e) {}
+
+      setIsLoaded(true);
+    } catch (err: any) {
+      console.error("[JS] Error processing scan results:", err);
+      const errMsg = err.message || String(err);
+      setScanError(errMsg);
+      setScanLogs(prev => [...prev, `[Error] ${errMsg}`]);
+    } finally {
+      removeListener();
+      removeDependabotListener();
+      setIsScanning(false);
+      setScanProgress(0);
     }
   };
 
@@ -363,11 +418,15 @@ export default function App() {
   const resetState = () => {
     setIsLoaded(false);
     setIsScanning(false);
+    setIsDetecting(false);
     setScanError(null);
     setCodeQlAlerts([]);
     setDependabotAlerts([]);
     setScanStats(null);
     setSnippetCache({});
+    setDetectedStack(null);
+    setCurrentProjectPath(null);
+    setScanWarnings([]);
   };
 
   const getSeverityBadgeClass = (severity: string) => {
@@ -504,7 +563,7 @@ export default function App() {
 
         <div className="content-card">
           {!isLoaded ? (
-            (isScanning || scanError) ? (
+            (isScanning || (scanError && !isDetecting && !detectedStack)) ? (
               <section className="scanning-section">
                 <div className="scanning-header">
                   <h2>{scanError ? "Scan Failed" : "Active Security Scan"}</h2>
@@ -542,6 +601,77 @@ export default function App() {
                     </div>
                   </div>
                 )}
+              </section>
+            ) : detectedStack ? (
+              <section className="prescan-section" style={{ padding: '2rem' }}>
+                <h2 style={{ marginBottom: '0.5rem' }}>Project Detected: {currentProjectPath?.split('/').pop()}</h2>
+                <p className="text-muted">Select the languages and ecosystems to include in the analysis.</p>
+                
+                <div style={{ display: 'flex', gap: '2rem', marginTop: '2rem', flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: '300px', background: '#f8fafc', padding: '1.5rem', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                    <h3 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+                      Languages (CodeQL)
+                    </h3>
+                    {detectedStack.languages.map((l, i) => (
+                      <div key={`l-${i}`} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem', padding: '0.5rem', background: '#fff', borderRadius: '4px', border: '1px solid #e2e8f0' }}>
+                        <input type="checkbox" id={`lang-${i}`} checked={l.selected} onChange={() => {
+                          const newStack = {...detectedStack};
+                          newStack.languages[i].selected = !l.selected;
+                          setDetectedStack(newStack);
+                        }} style={{ width: '18px', height: '18px', accentColor: '#3b82f6' }} />
+                        <label htmlFor={`lang-${i}`} style={{ flex: 1, cursor: 'pointer', fontWeight: 500 }}>{l.name}</label>
+                        <span className="badge note">{l.code_lines.toLocaleString()} lines</span>
+                      </div>
+                    ))}
+                    {detectedStack.languages.length === 0 && <p className="text-muted" style={{ fontStyle: 'italic' }}>No supported languages found.</p>}
+                  </div>
+                  
+                  <div style={{ flex: 1, minWidth: '300px', background: '#f8fafc', padding: '1.5rem', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                    <h3 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>
+                      Dependencies (Dependabot)
+                    </h3>
+                    {detectedStack.ecosystems.map((e, i) => (
+                      <div key={`e-${i}`} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem', padding: '0.5rem', background: '#fff', borderRadius: '4px', border: '1px solid #e2e8f0' }}>
+                        <input type="checkbox" id={`eco-${i}`} checked={e.selected} onChange={() => {
+                          const newStack = {...detectedStack};
+                          newStack.ecosystems[i].selected = !e.selected;
+                          setDetectedStack(newStack);
+                        }} style={{ width: '18px', height: '18px', accentColor: '#3b82f6' }} />
+                        <label htmlFor={`eco-${i}`} style={{ flex: 1, cursor: 'pointer', fontWeight: 500 }}>{e.name}</label>
+                        <code style={{ fontSize: '0.75rem', padding: '2px 6px', background: '#f1f5f9', borderRadius: '4px' }}>{e.directory}</code>
+                      </div>
+                    ))}
+                    {detectedStack.ecosystems.length === 0 && <p className="text-muted" style={{ fontStyle: 'italic' }}>No supported manifests found.</p>}
+                  </div>
+                </div>
+                
+                {scanError && (
+                  <div className="scan-error-banner" style={{ marginTop: '1.5rem', padding: '1rem', background: '#fee2e2', border: '1px solid #ef4444', borderRadius: '8px', color: '#b91c1c' }}>
+                    <strong>Error:</strong> {scanError}
+                  </div>
+                )}
+
+                <div style={{ marginTop: '2rem', display: 'flex', gap: '1rem', borderTop: '1px solid #e2e8f0', paddingTop: '1.5rem' }}>
+                  <button className="btn-primary" onClick={startAnalysis} disabled={!detectedStack.languages.some(l => l.selected) && !detectedStack.ecosystems.some(e => e.selected)}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                    Start Analysis
+                  </button>
+                  <button className="btn-secondary" onClick={() => { setDetectedStack(null); setScanError(null); }}>
+                    Cancel
+                  </button>
+                </div>
+              </section>
+            ) : isDetecting ? (
+              <section className="scanning-section">
+                <div className="scanning-header">
+                  <h2>Detecting Project Stack</h2>
+                  <p>Analyzing project structure and languages...</p>
+                </div>
+                <div className="progress-bar-container">
+                  <div className="progress-bar-fill" style={{ width: `100%`, animation: 'pulse 1.5s infinite' }}></div>
+                </div>
               </section>
             ) : (
               <section className="upload-section">
@@ -594,6 +724,18 @@ export default function App() {
                       <span className="label">Medium</span>
                     </div>
                   </div>
+
+                  {scanWarnings.length > 0 && (
+                    <div style={{ marginTop: '1rem', padding: '1rem', background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: '8px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem', fontWeight: 600, color: '#92400e' }}>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                        Some scans encountered errors
+                      </div>
+                      <ul style={{ margin: 0, padding: '0 0 0 1.25rem', color: '#78350f', fontSize: '0.875rem', lineHeight: '1.6' }}>
+                        {scanWarnings.map((w, i) => <li key={i}>{w}</li>)}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               )}
 

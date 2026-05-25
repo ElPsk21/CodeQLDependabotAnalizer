@@ -13,6 +13,7 @@ pub const CodeQlBridge = struct {
     const ScanArgs = struct {
         self: *CodeQlBridge,
         path: []const u8,
+        language: []const u8,
         id: []const u8,
         responder: zero_native.bridge.AsyncResponder,
     };
@@ -20,21 +21,30 @@ pub const CodeQlBridge = struct {
     pub fn runScan(context: *anyopaque, invocation: zero_native.bridge.Invocation, responder: zero_native.bridge.AsyncResponder) anyerror!void {
         const self: *CodeQlBridge = @ptrCast(@alignCast(context));
         
-        // Parse payload for source path
-        // Simple manual parse to avoid std.json issues if they persist
+        // Parse payload for source path and language (fallback to javascript)
         const path_key = "\"path\":\"";
         const start_index = std.mem.indexOf(u8, invocation.request.payload, path_key) orelse return error.InvalidRequest;
         const path_start = start_index + path_key.len;
         const end_index = std.mem.indexOfScalarPos(u8, invocation.request.payload, path_start, '"') orelse return error.InvalidRequest;
         const project_path = invocation.request.payload[path_start..end_index];
 
-        // Duplicate path for the thread
+        var language: []const u8 = "javascript";
+        const lang_key = "\"language\":\"";
+        if (std.mem.indexOf(u8, invocation.request.payload, lang_key)) |l_start_idx| {
+            const l_start = l_start_idx + lang_key.len;
+            if (std.mem.indexOfScalarPos(u8, invocation.request.payload, l_start, '"')) |l_end| {
+                language = invocation.request.payload[l_start..l_end];
+            }
+        }
+
+        // Duplicate path and language for the thread
         const project_path_copy = try self.allocator.dupe(u8, project_path);
+        const language_copy = try self.allocator.dupe(u8, language);
         const request_id_copy = try self.allocator.dupe(u8, invocation.request.id);
 
         // Run in a separate thread to not block the bridge
         const args = try self.allocator.create(ScanArgs);
-        args.* = .{ .self = self, .path = project_path_copy, .id = request_id_copy, .responder = responder };
+        args.* = .{ .self = self, .path = project_path_copy, .language = language_copy, .id = request_id_copy, .responder = responder };
 
         const thread = try std.Thread.spawn(.{}, runScanInternal, .{args});
         thread.detach();
@@ -43,29 +53,46 @@ pub const CodeQlBridge = struct {
     fn runScanInternal(args: *ScanArgs) void {
         const self = args.self;
         const project_path = args.path;
+        const language = args.language;
         const request_id = args.id;
         const responder = args.responder;
         const allocator = self.allocator;
         
         defer allocator.free(project_path);
+        defer allocator.free(language);
         defer allocator.free(request_id);
         defer allocator.destroy(args);
 
-        const db_full_path = std.fs.path.join(allocator, &.{ project_path, "codeql_db" }) catch return;
+        const db_folder_name = std.fmt.allocPrint(allocator, "codeql_db_{s}", .{language}) catch return;
+        defer allocator.free(db_folder_name);
+        
+        const db_full_path = std.fs.path.join(allocator, &.{ project_path, db_folder_name }) catch return;
         defer allocator.free(db_full_path);
         
-        const sarif_path = std.fs.path.join(allocator, &.{ project_path, "results.sarif" }) catch return;
+        const sarif_name = std.fmt.allocPrint(allocator, "results_{s}.sarif", .{language}) catch return;
+        defer allocator.free(sarif_name);
+        const sarif_path = std.fs.path.join(allocator, &.{ project_path, sarif_name }) catch return;
         defer allocator.free(sarif_path);
+
+        const lang_arg = std.fmt.allocPrint(allocator, "--language={s}", .{language}) catch return;
+        defer allocator.free(lang_arg);
 
         // 1. Database Create
         {
             self.emitLog(responder, "[CodeQL] Creating database...") catch {};
             std.debug.print("[Debug] Executing CodeQL at: {s}\n", .{self.codeql_path});
             std.debug.print("[Debug] Project path: {s}\n", .{project_path});
+            std.debug.print("[Debug] Language: {s}\n", .{language});
             std.debug.print("[Debug] DB path: {s}\n", .{db_full_path});
 
+            const cmd = std.fmt.allocPrint(allocator, "export PATH=/home/frano/.dotnet:$PATH && \"{s}\" database create \"{s}\" --source-root \"{s}\" \"{s}\" --overwrite", .{self.codeql_path, db_full_path, project_path, lang_arg}) catch |err| {
+                self.fail(responder, request_id, "OOM creating build command", err) catch {};
+                return;
+            };
+            defer allocator.free(cmd);
+
             const result = std.process.run(allocator, self.io, .{
-                .argv = &.{ self.codeql_path, "database", "create", db_full_path, "--source-root", project_path, "--language=javascript", "--overwrite" },
+                .argv = &.{ "bash", "-c", cmd },
             }) catch |err| {
                 std.debug.print("[Error] Failed to start CodeQL process: {s}\n", .{@errorName(err)});
                 self.fail(responder, request_id, "Failed to run database create", err) catch {};
@@ -76,7 +103,35 @@ pub const CodeQlBridge = struct {
 
             if (result.term != .exited or result.term.exited != 0) {
                 std.debug.print("[Error] CodeQL database create failed.\nStdout: {s}\nStderr: {s}\n", .{result.stdout, result.stderr});
-                self.fail(responder, request_id, "CodeQL database create failed", error.ChildProcessFailed) catch {};
+                // Send stderr info to the frontend so the user sees what failed
+                const err_detail = result.stderr;
+                if (err_detail.len > 0) {
+                    // Build a JSON error message with the stderr detail
+                    const full_err_msg = std.fmt.allocPrint(allocator, "CodeQL database create failed ({s}): {s}", .{language, err_detail[0..@min(err_detail.len, 200)]}) catch {
+                        self.fail(responder, request_id, "CodeQL database create failed", error.ChildProcessFailed) catch {};
+                        return;
+                    };
+                    defer allocator.free(full_err_msg);
+
+                    var json_out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+                    defer json_out.deinit(allocator);
+                    json_out.appendSlice(allocator, "{\"error\":") catch {
+                        self.fail(responder, request_id, "CodeQL database create failed", error.ChildProcessFailed) catch {};
+                        return;
+                    };
+                    escapeJsonString(allocator, full_err_msg, &json_out) catch {
+                        self.fail(responder, request_id, "CodeQL database create failed", error.ChildProcessFailed) catch {};
+                        return;
+                    };
+                    json_out.appendSlice(allocator, "}") catch {
+                        self.fail(responder, request_id, "CodeQL database create failed", error.ChildProcessFailed) catch {};
+                        return;
+                    };
+
+                    responder.success(request_id, json_out.items) catch {};
+                } else {
+                    self.fail(responder, request_id, "CodeQL database create failed", error.ChildProcessFailed) catch {};
+                }
                 return;
             }
             std.debug.print("[Success] CodeQL database created at {s}\n", .{db_full_path});
@@ -88,8 +143,14 @@ pub const CodeQlBridge = struct {
             std.debug.print("[Debug] Analyzing DB at: {s}\n", .{db_full_path});
             std.debug.print("[Debug] Output SARIF at: {s}\n", .{sarif_path});
 
+            const cmd = std.fmt.allocPrint(allocator, "export PATH=/home/frano/.dotnet:$PATH && \"{s}\" database analyze \"{s}\" --format=sarif-latest --output \"{s}\"", .{self.codeql_path, db_full_path, sarif_path}) catch |err| {
+                self.fail(responder, request_id, "OOM creating analyze command", err) catch {};
+                return;
+            };
+            defer allocator.free(cmd);
+
             const result = std.process.run(allocator, self.io, .{
-                .argv = &.{ self.codeql_path, "database", "analyze", db_full_path, "--format=sarif-latest", "--output", sarif_path },
+                .argv = &.{ "bash", "-c", cmd },
             }) catch |err| {
                 std.debug.print("[Error] Failed to start analysis: {s}\n", .{@errorName(err)});
                 self.fail(responder, request_id, "Failed to run database analyze", err) catch {};
@@ -100,7 +161,33 @@ pub const CodeQlBridge = struct {
 
             if (result.term != .exited or result.term.exited != 0) {
                 std.debug.print("[Error] CodeQL analysis failed.\nStdout: {s}\nStderr: {s}\n", .{ result.stdout, result.stderr });
-                self.fail(responder, request_id, "CodeQL analysis failed", error.ChildProcessFailed) catch {};
+                const err_detail = result.stderr;
+                if (err_detail.len > 0) {
+                    const full_err_msg = std.fmt.allocPrint(allocator, "CodeQL analysis failed ({s}): {s}", .{language, err_detail[0..@min(err_detail.len, 200)]}) catch {
+                        self.fail(responder, request_id, "CodeQL analysis failed", error.ChildProcessFailed) catch {};
+                        return;
+                    };
+                    defer allocator.free(full_err_msg);
+
+                    var json_out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+                    defer json_out.deinit(allocator);
+                    json_out.appendSlice(allocator, "{\"error\":") catch {
+                        self.fail(responder, request_id, "CodeQL analysis failed", error.ChildProcessFailed) catch {};
+                        return;
+                    };
+                    escapeJsonString(allocator, full_err_msg, &json_out) catch {
+                        self.fail(responder, request_id, "CodeQL analysis failed", error.ChildProcessFailed) catch {};
+                        return;
+                    };
+                    json_out.appendSlice(allocator, "}") catch {
+                        self.fail(responder, request_id, "CodeQL analysis failed", error.ChildProcessFailed) catch {};
+                        return;
+                    };
+
+                    responder.success(request_id, json_out.items) catch {};
+                } else {
+                    self.fail(responder, request_id, "CodeQL analysis failed", error.ChildProcessFailed) catch {};
+                }
                 return;
             }
             // Verify file exists and get size safely using self.io
