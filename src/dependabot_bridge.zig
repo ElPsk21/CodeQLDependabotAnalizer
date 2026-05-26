@@ -86,23 +86,17 @@ pub const DependabotBridge = struct {
 
         const candidates = &[_][]const u8{
             "../../scripts/dependabot_runner.py",
+            "../../../scripts/dependabot_runner.py",
             "../../../../scripts/dependabot_runner.py",
             "../scripts/dependabot_runner.py",
-            "/home/frano/my_app/scripts/dependabot_runner.py",
         };
 
         var resolved_script_path: ?[]const u8 = null;
         for (candidates) |candidate| {
-            const joined_path = if (std.fs.path.isAbsolute(candidate))
-                allocator.dupe(u8, candidate) catch {
-                    self.fail(responder, request_id, "OOM building script path", error.OutOfMemory) catch {};
-                    return;
-                }
-            else
-                std.fs.path.join(allocator, &.{ exe_dir_path, candidate }) catch {
-                    self.fail(responder, request_id, "OOM building script path", error.OutOfMemory) catch {};
-                    return;
-                };
+            const joined_path = std.fs.path.join(allocator, &.{ exe_dir_path, candidate }) catch {
+                self.fail(responder, request_id, "OOM building script path", error.OutOfMemory) catch {};
+                return;
+            };
             
             if (std.Io.Dir.openFileAbsolute(self.io, joined_path, .{})) |file| {
                 file.close(self.io);
