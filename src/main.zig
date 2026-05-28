@@ -4,6 +4,7 @@ const zero_native = @import("zero-native");
 const bridge = @import("bridge.zig");
 const dependabot_bridge = @import("dependabot_bridge.zig");
 const project_detector_bridge = @import("project_detector_bridge.zig");
+const copilot_bridge = @import("copilot_bridge.zig");
 
 pub const panic = std.debug.FullPanic(zero_native.debug.capturePanic);
 
@@ -13,6 +14,7 @@ const App = struct {
     codeql_bridge: bridge.CodeQlBridge,
     dependabot_bridge: dependabot_bridge.DependabotBridge,
     project_detector_bridge: project_detector_bridge.ProjectDetectorBridge,
+    copilot_bridge: copilot_bridge.CopilotBridge,
 
     fn app(self: *@This()) zero_native.App {
         return .{
@@ -72,6 +74,7 @@ pub const SystemBridge = struct {
 pub const SettingsBridge = struct {
     codeql_bridge: *bridge.CodeQlBridge,
     dependabot_bridge_instance: *dependabot_bridge.DependabotBridge,
+    copilot_bridge_instance: *copilot_bridge.CopilotBridge,
     allocator: std.mem.Allocator,
 
     pub fn updatePaths(context: *anyopaque, invocation: zero_native.bridge.Invocation, responder: zero_native.bridge.AsyncResponder) anyerror!void {
@@ -129,6 +132,23 @@ pub const SettingsBridge = struct {
             }
         }
 
+        // Parse copilotCliPath
+        const cop_key = "\"copilotCliPath\":\"";
+        if (std.mem.indexOf(u8, payload, cop_key)) |idx| {
+            const start = idx + cop_key.len;
+            if (std.mem.indexOfScalarPos(u8, payload, start, '"')) |end| {
+                const value = payload[start..end];
+                if (value.len > 0) {
+                    if (self.copilot_bridge_instance.copilot_cli_path.len > 0) {
+                        self.allocator.free(self.copilot_bridge_instance.copilot_cli_path);
+                    }
+                    const duped = try self.allocator.dupe(u8, value);
+                    self.copilot_bridge_instance.copilot_cli_path = duped;
+                    std.debug.print("[Settings] Copilot CLI path set to: {s}\n", .{duped});
+                }
+            }
+        }
+
         try responder.success(invocation.request.id, "{\"ok\":true}");
     }
 };
@@ -142,19 +162,21 @@ pub fn main(init: std.process.Init) !void {
         .codeql_bridge = bridge.CodeQlBridge.init(allocator, init.io),
         .dependabot_bridge = dependabot_bridge.DependabotBridge.init(allocator, init.io),
         .project_detector_bridge = project_detector_bridge.ProjectDetectorBridge.init(allocator, init.io),
+        .copilot_bridge = copilot_bridge.CopilotBridge.init(allocator, init.io),
     };
 
     var system_bridge = SystemBridge.init(allocator, init.io);
     var settings_bridge = SettingsBridge{
         .codeql_bridge = &app_instance.codeql_bridge,
         .dependabot_bridge_instance = &app_instance.dependabot_bridge,
+        .copilot_bridge_instance = &app_instance.copilot_bridge,
         .allocator = allocator,
     };
 
     const cq_disp = bridge.getDispatcher(allocator, &app_instance.codeql_bridge);
     
-    var handlers = allocator.alloc(zero_native.bridge.AsyncHandler, cq_disp.async_registry.handlers.len + 4) catch @panic("OOM");
-    var commands = allocator.alloc(zero_native.bridge.CommandPolicy, cq_disp.policy.commands.len + 4) catch @panic("OOM");
+    var handlers = allocator.alloc(zero_native.bridge.AsyncHandler, cq_disp.async_registry.handlers.len + 6) catch @panic("OOM");
+    var commands = allocator.alloc(zero_native.bridge.CommandPolicy, cq_disp.policy.commands.len + 6) catch @panic("OOM");
 
     @memcpy(handlers[0..cq_disp.async_registry.handlers.len], cq_disp.async_registry.handlers);
     handlers[cq_disp.async_registry.handlers.len] = .{
@@ -177,12 +199,23 @@ pub fn main(init: std.process.Init) !void {
         .context = &settings_bridge,
         .invoke_fn = SettingsBridge.updatePaths,
     };
-
+    handlers[cq_disp.async_registry.handlers.len + 4] = .{
+        .name = "copilot.resolveIssues",
+        .context = &app_instance.copilot_bridge,
+        .invoke_fn = copilot_bridge.CopilotBridge.resolveIssues,
+    };
+    handlers[cq_disp.async_registry.handlers.len + 5] = .{
+        .name = "copilot.login",
+        .context = &app_instance.copilot_bridge,
+        .invoke_fn = copilot_bridge.CopilotBridge.login,
+    };
     @memcpy(commands[0..cq_disp.policy.commands.len], cq_disp.policy.commands);
     commands[cq_disp.policy.commands.len] = .{ .name = "dependabot.runScan", .origins = &.{"*"} };
     commands[cq_disp.policy.commands.len + 1] = .{ .name = "scan.saveResults", .origins = &.{"*"} };
     commands[cq_disp.policy.commands.len + 2] = .{ .name = "project.detectStack", .origins = &.{"*"} };
     commands[cq_disp.policy.commands.len + 3] = .{ .name = "settings.updatePaths", .origins = &.{"*"} };
+    commands[cq_disp.policy.commands.len + 4] = .{ .name = "copilot.resolveIssues", .origins = &.{"*"} };
+    commands[cq_disp.policy.commands.len + 5] = .{ .name = "copilot.login", .origins = &.{"*"} };
 
     const combined_dispatcher = zero_native.BridgeDispatcher{
         .policy = .{ .enabled = true, .commands = commands },
@@ -222,5 +255,8 @@ pub fn main(init: std.process.Init) !void {
     }
     if (app_instance.dependabot_bridge.dependabot_cli_path.len > 0) {
         allocator.free(app_instance.dependabot_bridge.dependabot_cli_path);
+    }
+    if (app_instance.copilot_bridge.copilot_cli_path.len > 0) {
+        allocator.free(app_instance.copilot_bridge.copilot_cli_path);
     }
 }

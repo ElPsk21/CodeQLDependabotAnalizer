@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 
 // --- Types ---
 interface CodeQlAlert {
@@ -66,6 +66,7 @@ export default function App() {
   const [codeqlPath, setCodeqlPath] = useState(() => localStorage.getItem("settings.codeqlPath") || "");
   const [dependabotCliPath, setDependabotCliPath] = useState(() => localStorage.getItem("settings.dependabotCliPath") || "");
   const [dotnetPath, setDotnetPath] = useState(() => localStorage.getItem("settings.dotnetPath") || "");
+  const [copilotCliPath, setCopilotCliPath] = useState(() => localStorage.getItem("settings.copilotCliPath") || "");
   const [settingsSaved, setSettingsSaved] = useState(false);
   const [depSearch, setDepSearch] = useState("");
   const [depSort, setDepSort] = useState<"name" | "action">("name");
@@ -86,6 +87,18 @@ export default function App() {
   const [isLoadingSnippet, setIsLoadingSnippet] = useState(false);
   const [snippetCache, setSnippetCache] = useState<Record<string, string>>({});
   const [scanWarnings, setScanWarnings] = useState<string[]>([]);
+
+  // Copilot integration states
+  const [showCopilotModal, setShowCopilotModal] = useState(false);
+  const [copilotModalMode, setCopilotModalMode] = useState<'login' | 'resolving' | 'done' | 'error'>('login');
+  const [resolverLogs, setResolverLogs] = useState<string[]>([]);
+  const [resolverResult, setResolverResult] = useState<string | null>(null);
+  const [loginCode, setLoginCode] = useState('');
+  const [loginUrl, setLoginUrl] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [copilotToken, setCopilotToken] = useState<string | null>(null);
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const copilotLogListenerRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (selectedAlert && selectedAlert.type === "codeql" && scanStats) {
@@ -160,7 +173,8 @@ export default function App() {
       await (window as any).zero.invoke("settings.updatePaths", {
         codeqlPath: localStorage.getItem("settings.codeqlPath") || "",
         dependabotCliPath: localStorage.getItem("settings.dependabotCliPath") || "",
-        dotnetPath: localStorage.getItem("settings.dotnetPath") || ""
+        dotnetPath: localStorage.getItem("settings.dotnetPath") || "",
+        copilotCliPath: localStorage.getItem("settings.copilotCliPath") || ""
       });
     } catch (e) {
       console.debug("[JS] settings.updatePaths not available yet", e);
@@ -193,6 +207,7 @@ export default function App() {
     localStorage.setItem("settings.codeqlPath", codeqlPath);
     localStorage.setItem("settings.dependabotCliPath", dependabotCliPath);
     localStorage.setItem("settings.dotnetPath", dotnetPath);
+    localStorage.setItem("settings.copilotCliPath", copilotCliPath);
     await sendPathsToBackend();
     setSettingsSaved(true);
     setTimeout(() => setSettingsSaved(false), 2000);
@@ -505,6 +520,130 @@ export default function App() {
       return 0;
     });
 
+  // --- Copilot resolve logic ---
+
+  const closeCopilotModal = () => {
+    if (pollIntervalRef.current) {
+      clearTimeout(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (copilotLogListenerRef.current) {
+      copilotLogListenerRef.current();
+      copilotLogListenerRef.current = null;
+    }
+    setShowCopilotModal(false);
+    setCopilotModalMode('login');
+    setResolverLogs([]);
+    setResolverResult(null);
+    setLoginCode('');
+    setLoginUrl('');
+    setIsLoggingIn(false);
+  };
+
+  const parseResponse = (raw: any): any => {
+    if (typeof raw === "string") {
+      try { return JSON.parse(raw); } catch { return { output: raw }; }
+    }
+    if (raw instanceof Uint8Array || raw instanceof ArrayBuffer) {
+      try { return JSON.parse(new TextDecoder().decode(raw as any)); } catch { return {}; }
+    }
+    if (raw && typeof raw === "object" && "buffer" in raw) {
+      try { return JSON.parse(new TextDecoder().decode(new Uint8Array(raw.buffer as ArrayBuffer))); } catch { return {}; }
+    }
+    if (raw && typeof raw === "object" && '0' in raw && typeof raw[0] === 'number') {
+      const len = Object.keys(raw).filter(k => /^\d+$/.test(k)).length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = raw[i];
+      try { return JSON.parse(new TextDecoder().decode(bytes)); } catch { return {}; }
+    }
+    return raw || {};
+  };
+
+  const handleResolveIssues = async () => {
+    if (!scanStats || codeQlAlerts.length === 0) return;
+
+    setShowCopilotModal(true);
+    setResolverResult(null);
+    setCopilotModalMode('resolving');
+    setResolverLogs(['[Copilot] Preparando prompt para análisis...']);
+
+    // Register copilot-log event listener
+    if (copilotLogListenerRef.current) copilotLogListenerRef.current();
+    copilotLogListenerRef.current = (window as any).zero.on("copilot-log", (detail: any) => {
+      setResolverLogs(prev => [...prev, detail.message]);
+    });
+
+    const prompt = [
+      'You are a security expert. Explain how you would fix the following CodeQL security vulnerabilities found in the project.',
+      '',
+      'For each issue:',
+      '1. Read the file at the specified location.',
+      '2. Explain step-by-step how you would fix the vulnerability.',
+      '3. DO NOT apply any changes to the code. Only explain what you would do.',
+      '',
+      'Issues to analyze:',
+      ...codeQlAlerts.map((a, i) =>
+        `${i + 1}. [${a.rule}] ${a.description}\n   File: ${a.fullPath || a.location}\n   Lines: ${a.startLine}-${a.endLine}`
+      )
+    ].join('\n');
+
+    try {
+      const resolveRaw = await (window as any).zero.invoke("copilot.resolveIssues", {
+        projectPath: scanStats!.projectPath,
+        prompt
+      });
+      const resolveResult = parseResponse(resolveRaw);
+
+      if (resolveResult.needsAuth) {
+        handleCopilotLogin();
+        return;
+      }
+
+      setCopilotModalMode('done');
+      setResolverResult(resolveResult.output || 'Análisis completado.');
+    } catch (err: any) {
+      setCopilotModalMode('error');
+      setResolverResult(`Error llamando a Copilot: ${err.message || String(err)}`);
+    }
+  };
+
+  const handleCopilotLogin = async () => {
+    setCopilotModalMode('login');
+    setIsLoggingIn(true);
+    setLoginCode('');
+    setLoginUrl('');
+    
+    if (copilotLogListenerRef.current) copilotLogListenerRef.current();
+    copilotLogListenerRef.current = (window as any).zero.on("copilot-log", (detail: any) => {
+      const msg = detail.message;
+      if (msg.includes("https://github.com/login/device") && msg.includes("code")) {
+        const urlMatch = msg.match(/https:\/\/github\.com\/login\/device/);
+        const codeMatch = msg.match(/code\s+([A-Z0-9-]+)/i);
+        if (urlMatch) setLoginUrl(urlMatch[0]);
+        if (codeMatch && codeMatch[1]) setLoginCode(codeMatch[1]);
+      }
+    });
+
+    try {
+      const loginRaw = await (window as any).zero.invoke("copilot.login", {});
+      const loginResult = parseResponse(loginRaw);
+      
+      if (loginResult.success) {
+        setCopilotModalMode('done');
+        setResolverResult("Autenticación completada con éxito. Ya puedes resolver incidencias.");
+      } else {
+        setCopilotModalMode('error');
+        setResolverResult("Error en la autenticación. Revisa tu conexión o intenta de nuevo.");
+      }
+    } catch (err: any) {
+      setCopilotModalMode('error');
+      setResolverResult(`Error llamando a login: ${err.message || String(err)}`);
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+
   return (
     <div className="layout">
       {/* Sidebar Navigation */}
@@ -633,6 +772,25 @@ export default function App() {
                     </button>
                   </div>
                   <p className="settings-help">Directory containing the dotnet SDK. Only required for C#/.NET projects.</p>
+                </div>
+
+                <div className="settings-field">
+                  <label htmlFor="copilot-path">Copilot CLI Path</label>
+                  <div className="settings-input-row">
+                    <input
+                      id="copilot-path"
+                      type="text"
+                      className="settings-input"
+                      value={copilotCliPath}
+                      onChange={e => setCopilotCliPath(e.target.value)}
+                      placeholder="e.g. /usr/local/bin/copilot (defaults to PATH)"
+                    />
+                    <button className="settings-browse-btn" onClick={() => handleBrowse(setCopilotCliPath, "settings.copilotCliPath")}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                      Browse
+                    </button>
+                  </div>
+                  <p className="settings-help">Path to the GitHub Copilot CLI binary. Falls back to system PATH if empty.</p>
                 </div>
               </div>
 
@@ -868,11 +1026,11 @@ export default function App() {
                   <div className="codeql-view">
                     {codeQlAlerts.length > 0 && (
                       <div className="codeql-action-bar" style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px' }}>
-                        <button className="resolver-btn" onClick={() => {}}>
+                        <button className="resolver-btn" onClick={handleResolveIssues} disabled={showCopilotModal}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
                           </svg>
-                          Resolver incidencias
+                          {showCopilotModal ? 'Resolviendo...' : 'Resolver incidencias'}
                         </button>
                       </div>
                     )}
@@ -1082,6 +1240,159 @@ export default function App() {
           </>
         )}
       </div>
+      {/* Copilot Modal */}
+      {showCopilotModal && (
+        <div className="copilot-modal-overlay" onClick={() => { if (copilotModalMode === 'done' || copilotModalMode === 'error') closeCopilotModal(); }}>
+          <div className="copilot-modal" onClick={e => e.stopPropagation()}>
+            {copilotModalMode === 'login' && (
+              <div className="copilot-login-section">
+                <div className="copilot-modal-icon">
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"></path>
+                    <path d="M9 18c-4.51 2-5-2-7-2"></path>
+                  </svg>
+                </div>
+                <h2>Autenticación con GitHub</h2>
+                <p className="copilot-modal-subtitle">Para usar Copilot, autentícate con tu cuenta de GitHub</p>
+
+                {loginCode ? (
+                  <>
+                    <p className="copilot-modal-label">Tu código de dispositivo:</p>
+                    <div className="copilot-device-code" onClick={() => { navigator.clipboard.writeText(loginCode); }}>
+                      {loginCode}
+                      <span className="copilot-copy-hint">Click para copiar</span>
+                    </div>
+                    <button
+                      className="copilot-github-link"
+                      onClick={async () => {
+                        try {
+                          await (window as any).zero.invoke("copilot.openUrl", { url: loginUrl });
+                        } catch (e) {
+                          console.warn('[JS] Failed to open URL via backend', e);
+                        }
+                      }}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                        <polyline points="15 3 21 3 21 9"></polyline>
+                        <line x1="10" y1="14" x2="21" y2="3"></line>
+                      </svg>
+                      Abrir github.com/login/device
+                    </button>
+                    <div className="copilot-waiting">
+                      <div className="copilot-spinner"></div>
+                      <span>Esperando autenticación...</span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="copilot-waiting">
+                    <div className="copilot-spinner"></div>
+                    <span>Conectando con GitHub...</span>
+                  </div>
+                )}
+
+                <button className="copilot-cancel-btn" onClick={closeCopilotModal}>Cancelar</button>
+              </div>
+            )}
+
+            {copilotModalMode === 'resolving' && (
+              <div className="copilot-resolver-section">
+                <div className="copilot-modal-icon resolving">
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                  </svg>
+                </div>
+                <h2>Copilot está trabajando</h2>
+                <p className="copilot-modal-subtitle">Resolviendo {codeQlAlerts.length} incidencia{codeQlAlerts.length !== 1 ? 's' : ''} de CodeQL...</p>
+
+                <div className="terminal-mock" style={{ marginTop: '1.5rem' }}>
+                  <div className="terminal-header">
+                    <span className="dot dot-red"></span>
+                    <span className="dot dot-yellow"></span>
+                    <span className="dot dot-green"></span>
+                    <span className="title">copilot — resolving</span>
+                  </div>
+                  <div className="terminal-body">
+                    {resolverLogs.map((log, i) => (
+                      <div key={i} className="terminal-line">{log}</div>
+                    ))}
+                    <div className="terminal-cursor">_</div>
+                  </div>
+                </div>
+
+                <p className="copilot-modal-hint">Esto puede tardar varios minutos dependiendo del número de incidencias.</p>
+                <button className="copilot-cancel-btn" onClick={closeCopilotModal}>Cancelar</button>
+              </div>
+            )}
+
+            {copilotModalMode === 'done' && (
+              <div className="copilot-resolver-section">
+                <div className="copilot-modal-icon done">
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                </div>
+                <h2>Resolución completada</h2>
+                <p className="copilot-modal-subtitle">Copilot ha analizado y modificado los archivos del proyecto.</p>
+
+                {resolverResult && (
+                  <div className="terminal-mock" style={{ marginTop: '1.5rem' }}>
+                    <div className="terminal-header">
+                      <span className="dot dot-red"></span>
+                      <span className="dot dot-yellow"></span>
+                      <span className="dot dot-green"></span>
+                      <span className="title">copilot — output</span>
+                    </div>
+                    <div className="terminal-body" style={{ maxHeight: '300px' }}>
+                      {(resolverResult ?? '').split('\n').map((line, i) => (
+                        <div key={i} className="terminal-line">{line}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <p className="copilot-modal-hint">Revisa los cambios con git diff. Se recomienda volver a escanear el proyecto para verificar las correcciones.</p>
+                <button className="copilot-done-btn" onClick={closeCopilotModal}>Cerrar</button>
+              </div>
+            )}
+
+            {copilotModalMode === 'error' && (
+              <div className="copilot-resolver-section">
+                <div className="copilot-modal-icon error">
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="15" y1="9" x2="9" y2="15"></line>
+                    <line x1="9" y1="9" x2="15" y2="15"></line>
+                  </svg>
+                </div>
+                <h2>Error</h2>
+                <p className="copilot-modal-subtitle">Se produjo un error durante la resolución.</p>
+
+                {resolverResult && (
+                  <div className="terminal-mock" style={{ marginTop: '1rem', marginBottom: '1rem' }}>
+                    <div className="terminal-header">
+                      <span className="dot dot-red"></span>
+                      <span className="dot dot-yellow"></span>
+                      <span className="dot dot-green"></span>
+                      <span className="title">error</span>
+                    </div>
+                    <div className="terminal-body">
+                      <div className="terminal-line" style={{ color: '#ef4444', whiteSpace: 'pre-wrap' }}>{resolverResult}</div>
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+                  {resolverResult?.includes('no está autenticado') && (
+                    <button className="copilot-done-btn" onClick={handleCopilotLogin}>Iniciar sesión en Copilot</button>
+                  )}
+                  <button className="copilot-cancel-btn" onClick={closeCopilotModal}>Cerrar</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
