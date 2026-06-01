@@ -270,4 +270,77 @@ pub const CopilotBridge = struct {
 
         responder.success(request_id, json_out.items) catch {};
     }
+
+    const ProposedFix = struct {
+        filePath: []const u8,
+        content: []const u8,
+    };
+
+    const ApplyFixesPayload = struct {
+        fixes: []ProposedFix,
+    };
+
+    pub fn applyFixes(context: *anyopaque, invocation: zero_native.bridge.Invocation, responder: zero_native.bridge.AsyncResponder) anyerror!void {
+        const self: *CopilotBridge = @ptrCast(@alignCast(context));
+        const allocator = self.allocator;
+        
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+
+        const payload = std.json.parseFromSlice(ApplyFixesPayload, arena.allocator(), invocation.request.payload, .{ .ignore_unknown_fields = true }) catch |err| {
+            self.fail(responder, invocation.request.id, "Failed to parse applyFixes payload", err);
+            return;
+        };
+
+        var applied_files = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var errors = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+
+        for (payload.value.fixes) |fix| {
+            if (applyFixToFile(self, fix.filePath, fix.content)) {
+                applied_files.append(arena.allocator(), fix.filePath) catch {};
+            } else |err| {
+                const err_msg = std.fmt.allocPrint(arena.allocator(), "{s}: {s}", .{fix.filePath, @errorName(err)}) catch continue;
+                errors.append(arena.allocator(), err_msg) catch {};
+            }
+        }
+
+        var json_out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        json_out.appendSlice(arena.allocator(), "{\"applied\":[") catch return;
+        for (applied_files.items, 0..) |f, i| {
+            if (i > 0) json_out.appendSlice(arena.allocator(), ",") catch return;
+            escapeJsonString(arena.allocator(), f, &json_out) catch return;
+        }
+        json_out.appendSlice(arena.allocator(), "],\"errors\":[") catch return;
+        for (errors.items, 0..) |e, i| {
+            if (i > 0) json_out.appendSlice(arena.allocator(), ",") catch return;
+            escapeJsonString(arena.allocator(), e, &json_out) catch return;
+        }
+        json_out.appendSlice(arena.allocator(), "]}") catch return;
+
+        responder.success(invocation.request.id, json_out.items) catch {};
+    }
+
+    fn applyFixToFile(self: *CopilotBridge, file_path: []const u8, content: []const u8) !void {
+        // Create backup
+        const backup_path = try std.fmt.allocPrint(self.allocator, "{s}.bak", .{file_path});
+        defer self.allocator.free(backup_path);
+
+        // Optional backup creation, ignore error if source file doesn't exist yet
+        if (std.Io.Dir.openFileAbsolute(self.io, file_path, .{})) |orig_file| {
+            defer orig_file.close(self.io);
+            const orig_size = (try orig_file.stat(self.io)).size;
+            const orig_content = try self.allocator.alloc(u8, orig_size);
+            defer self.allocator.free(orig_content);
+            _ = try orig_file.readPositionalAll(self.io, orig_content, 0);
+
+            const backup_file = try std.Io.Dir.createFileAbsolute(self.io, backup_path, .{});
+            defer backup_file.close(self.io);
+            try backup_file.writePositionalAll(self.io, orig_content, 0);
+        } else |_| {}
+
+        // Write new content
+        const new_file = try std.Io.Dir.createFileAbsolute(self.io, file_path, .{});
+        defer new_file.close(self.io);
+        try new_file.writePositionalAll(self.io, content, 0);
+    }
 };

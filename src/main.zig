@@ -175,8 +175,8 @@ pub fn main(init: std.process.Init) !void {
 
     const cq_disp = bridge.getDispatcher(allocator, &app_instance.codeql_bridge);
     
-    var handlers = allocator.alloc(zero_native.bridge.AsyncHandler, cq_disp.async_registry.handlers.len + 6) catch @panic("OOM");
-    var commands = allocator.alloc(zero_native.bridge.CommandPolicy, cq_disp.policy.commands.len + 6) catch @panic("OOM");
+    var handlers = allocator.alloc(zero_native.bridge.AsyncHandler, cq_disp.async_registry.handlers.len + 7) catch @panic("OOM");
+    var commands = allocator.alloc(zero_native.bridge.CommandPolicy, cq_disp.policy.commands.len + 7) catch @panic("OOM");
 
     @memcpy(handlers[0..cq_disp.async_registry.handlers.len], cq_disp.async_registry.handlers);
     handlers[cq_disp.async_registry.handlers.len] = .{
@@ -209,6 +209,11 @@ pub fn main(init: std.process.Init) !void {
         .context = &app_instance.copilot_bridge,
         .invoke_fn = copilot_bridge.CopilotBridge.login,
     };
+    handlers[cq_disp.async_registry.handlers.len + 6] = .{
+        .name = "copilot.applyFixes",
+        .context = &app_instance.copilot_bridge,
+        .invoke_fn = copilot_bridge.CopilotBridge.applyFixes,
+    };
     @memcpy(commands[0..cq_disp.policy.commands.len], cq_disp.policy.commands);
     commands[cq_disp.policy.commands.len] = .{ .name = "dependabot.runScan", .origins = &.{"*"} };
     commands[cq_disp.policy.commands.len + 1] = .{ .name = "scan.saveResults", .origins = &.{"*"} };
@@ -216,6 +221,7 @@ pub fn main(init: std.process.Init) !void {
     commands[cq_disp.policy.commands.len + 3] = .{ .name = "settings.updatePaths", .origins = &.{"*"} };
     commands[cq_disp.policy.commands.len + 4] = .{ .name = "copilot.resolveIssues", .origins = &.{"*"} };
     commands[cq_disp.policy.commands.len + 5] = .{ .name = "copilot.login", .origins = &.{"*"} };
+    commands[cq_disp.policy.commands.len + 6] = .{ .name = "copilot.applyFixes", .origins = &.{"*"} };
 
     const combined_dispatcher = zero_native.BridgeDispatcher{
         .policy = .{ .enabled = true, .commands = commands },
