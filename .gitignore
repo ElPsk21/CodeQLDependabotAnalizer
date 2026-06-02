@@ -25,6 +25,10 @@ bin/
 *.swo
 .DS_Store
 
+#Tokens
+firebase_token.txt
+service-account.json
+*.Identifier
 # Logs
 *.log
 npm-debug.log*

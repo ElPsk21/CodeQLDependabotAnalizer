@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
+import { initializeFirebasePush, listenToMessages } from "./firebase";
 
 // --- Types ---
 interface CodeQlAlert {
@@ -112,6 +113,15 @@ export default function App() {
   const [copilotToken, setCopilotToken] = useState<string | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const copilotLogListenerRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    initializeFirebasePush().then(token => {
+      if (token && (window as any).zero) {
+        (window as any).zero.invoke("firebase.saveToken", { token }).catch(console.error);
+      }
+    });
+    listenToMessages();
+  }, []);
 
   useEffect(() => {
     if (selectedAlert && selectedAlert.type === "codeql" && scanStats) {
@@ -478,6 +488,27 @@ export default function App() {
         });
         setScanLogs(prev => [...prev, `[Scan] Results saved to ${currentProjectPath}/scan_results.json`]);
       } catch (e) { }
+
+      // --- FIREBASE DYNAMIC PUSH ---
+      try {
+        if ((window as any).zero) {
+          const totalIssues = stats.critical + stats.high + stats.medium + stats.low;
+          let bodyMsg = "¡El análisis ha finalizado perfectamente! 0 vulnerabilidades.";
+          if (totalIssues > 0) {
+            bodyMsg = `Análisis terminado con ${totalIssues} vulnerabilidades encontradas (Críticas: ${stats.critical}, Altas: ${stats.high}).`;
+          }
+          if (errors.length > 0) {
+            bodyMsg += " Ojo: Hubo errores en algunos escáneres.";
+          }
+          await (window as any).zero.invoke("firebase.sendPush", {
+            title: "ReportBot - Resultados listos",
+            body: bodyMsg
+          });
+        }
+      } catch (e) {
+        console.error("Failed to send Firebase Push", e);
+      }
+
 
       setIsLoaded(true);
     } catch (err: any) {

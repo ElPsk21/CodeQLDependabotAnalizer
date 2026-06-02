@@ -5,6 +5,7 @@ const bridge = @import("bridge.zig");
 const dependabot_bridge = @import("dependabot_bridge.zig");
 const project_detector_bridge = @import("project_detector_bridge.zig");
 const copilot_bridge = @import("copilot_bridge.zig");
+const firebase_bridge = @import("firebase.zig");
 
 pub const panic = std.debug.FullPanic(zero_native.debug.capturePanic);
 
@@ -15,6 +16,7 @@ const App = struct {
     dependabot_bridge: dependabot_bridge.DependabotBridge,
     project_detector_bridge: project_detector_bridge.ProjectDetectorBridge,
     copilot_bridge: copilot_bridge.CopilotBridge,
+    firebase_bridge: firebase_bridge.FirebaseBridge,
 
     fn app(self: *@This()) zero_native.App {
         return .{
@@ -163,6 +165,7 @@ pub fn main(init: std.process.Init) !void {
         .dependabot_bridge = dependabot_bridge.DependabotBridge.init(allocator, init.io),
         .project_detector_bridge = project_detector_bridge.ProjectDetectorBridge.init(allocator, init.io),
         .copilot_bridge = copilot_bridge.CopilotBridge.init(allocator, init.io),
+        .firebase_bridge = firebase_bridge.FirebaseBridge.init(allocator, init.io),
     };
 
     var system_bridge = SystemBridge.init(allocator, init.io);
@@ -175,8 +178,8 @@ pub fn main(init: std.process.Init) !void {
 
     const cq_disp = bridge.getDispatcher(allocator, &app_instance.codeql_bridge);
     
-    var handlers = allocator.alloc(zero_native.bridge.AsyncHandler, cq_disp.async_registry.handlers.len + 8) catch @panic("OOM");
-    var commands = allocator.alloc(zero_native.bridge.CommandPolicy, cq_disp.policy.commands.len + 8) catch @panic("OOM");
+    var handlers = allocator.alloc(zero_native.bridge.AsyncHandler, cq_disp.async_registry.handlers.len + 10) catch @panic("OOM");
+    var commands = allocator.alloc(zero_native.bridge.CommandPolicy, cq_disp.policy.commands.len + 10) catch @panic("OOM");
 
     @memcpy(handlers[0..cq_disp.async_registry.handlers.len], cq_disp.async_registry.handlers);
     handlers[cq_disp.async_registry.handlers.len] = .{
@@ -214,6 +217,7 @@ pub fn main(init: std.process.Init) !void {
         .context = &app_instance.copilot_bridge,
         .invoke_fn = copilot_bridge.CopilotBridge.applyFixes,
     };
+
     @memcpy(commands[0..cq_disp.policy.commands.len], cq_disp.policy.commands);
     commands[cq_disp.policy.commands.len] = .{ .name = "dependabot.runScan", .origins = &.{"*"} };
     commands[cq_disp.policy.commands.len + 1] = .{ .name = "scan.saveResults", .origins = &.{"*"} };
@@ -228,6 +232,18 @@ pub fn main(init: std.process.Init) !void {
         .invoke_fn = dependabot_bridge.DependabotBridge.updateDeps,
     };
     commands[cq_disp.policy.commands.len + 7] = .{ .name = "dependabot.updateDeps", .origins = &.{"*"} };
+    handlers[cq_disp.async_registry.handlers.len + 8] = .{
+        .name = "firebase.saveToken",
+        .context = &app_instance.firebase_bridge,
+        .invoke_fn = firebase_bridge.FirebaseBridge.saveToken,
+    };
+    commands[cq_disp.policy.commands.len + 8] = .{ .name = "firebase.saveToken", .origins = &.{"*"} };
+    handlers[cq_disp.async_registry.handlers.len + 9] = .{
+        .name = "firebase.sendPush",
+        .context = &app_instance.firebase_bridge,
+        .invoke_fn = firebase_bridge.FirebaseBridge.sendPush,
+    };
+    commands[cq_disp.policy.commands.len + 9] = .{ .name = "firebase.sendPush", .origins = &.{"*"} };
 
     const combined_dispatcher = zero_native.BridgeDispatcher{
         .policy = .{ .enabled = true, .commands = commands },
