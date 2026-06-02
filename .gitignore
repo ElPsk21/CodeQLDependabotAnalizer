@@ -29,6 +29,7 @@ bin/
 firebase_token.txt
 service-account.json
 *.Identifier
+
 # Logs
 *.log
 npm-debug.log*
