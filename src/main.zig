@@ -175,8 +175,8 @@ pub fn main(init: std.process.Init) !void {
 
     const cq_disp = bridge.getDispatcher(allocator, &app_instance.codeql_bridge);
     
-    var handlers = allocator.alloc(zero_native.bridge.AsyncHandler, cq_disp.async_registry.handlers.len + 7) catch @panic("OOM");
-    var commands = allocator.alloc(zero_native.bridge.CommandPolicy, cq_disp.policy.commands.len + 7) catch @panic("OOM");
+    var handlers = allocator.alloc(zero_native.bridge.AsyncHandler, cq_disp.async_registry.handlers.len + 8) catch @panic("OOM");
+    var commands = allocator.alloc(zero_native.bridge.CommandPolicy, cq_disp.policy.commands.len + 8) catch @panic("OOM");
 
     @memcpy(handlers[0..cq_disp.async_registry.handlers.len], cq_disp.async_registry.handlers);
     handlers[cq_disp.async_registry.handlers.len] = .{
@@ -222,6 +222,12 @@ pub fn main(init: std.process.Init) !void {
     commands[cq_disp.policy.commands.len + 4] = .{ .name = "copilot.resolveIssues", .origins = &.{"*"} };
     commands[cq_disp.policy.commands.len + 5] = .{ .name = "copilot.login", .origins = &.{"*"} };
     commands[cq_disp.policy.commands.len + 6] = .{ .name = "copilot.applyFixes", .origins = &.{"*"} };
+    handlers[cq_disp.async_registry.handlers.len + 7] = .{
+        .name = "dependabot.updateDeps",
+        .context = &app_instance.dependabot_bridge,
+        .invoke_fn = dependabot_bridge.DependabotBridge.updateDeps,
+    };
+    commands[cq_disp.policy.commands.len + 7] = .{ .name = "dependabot.updateDeps", .origins = &.{"*"} };
 
     const combined_dispatcher = zero_native.BridgeDispatcher{
         .policy = .{ .enabled = true, .commands = commands },

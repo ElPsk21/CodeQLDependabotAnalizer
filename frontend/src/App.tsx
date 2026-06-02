@@ -105,6 +105,7 @@ export default function App() {
   const [resolverLogs, setResolverLogs] = useState<string[]>([]);
   const [resolverResult, setResolverResult] = useState<string | null>(null);
   const [proposedFixes, setProposedFixes] = useState<ProposedFix[]>([]);
+  const [resolveTarget, setResolveTarget] = useState<'codeql' | 'dependabot'>('codeql');
   const [loginCode, setLoginCode] = useState('');
   const [loginUrl, setLoginUrl] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
@@ -577,7 +578,8 @@ export default function App() {
 
     setShowCopilotModal(true);
     setResolverResult(null);
-    setProposedFixes([]); // Clear previous proposed fixes
+    setProposedFixes([]);
+    setResolveTarget('codeql');
     setCopilotModalMode('resolving');
     setResolverLogs(['[Copilot] Preparando prompt para análisis...']);
 
@@ -753,6 +755,71 @@ export default function App() {
     } catch (err: any) {
       setCopilotModalMode('error');
       setResolverResult(`Error aplicando cambios: ${err.message || String(err)}`);
+    }
+  };
+
+  // --- Dependabot resolve logic ---
+
+  const handleResolveDependencies = () => {
+    if (dependabotAlerts.length === 0) return;
+
+    setShowCopilotModal(true);
+    setResolverResult(null);
+    setProposedFixes([]);
+    setResolveTarget('dependabot');
+
+    const fixes: ProposedFix[] = dependabotAlerts.map(alert => {
+      const updateType = getVersionUpdateType(alert.versionRange, alert.patchedVersion || "");
+      return {
+        filePath: alert.package,
+        content: alert.patchedVersion || "",
+        description: `Update ${alert.package} from ${alert.versionRange} to ${alert.patchedVersion}`,
+        issueRule: updateType,
+        difficulty: updateType === "major" ? "High" : updateType === "minor" ? "Medium" : "Low",
+        requiresHumanRevision: updateType === "major",
+        explanation: updateType === "major" ? "Major version update — may contain breaking changes" : undefined,
+        approved: updateType !== "major",
+      };
+    });
+
+    setProposedFixes(fixes);
+    setCopilotModalMode('approval');
+  };
+
+  const handleApplyDependencyUpdates = async () => {
+    const toApply = proposedFixes.filter(f => f.approved);
+    if (toApply.length === 0) {
+      setCopilotModalMode('done');
+      return;
+    }
+
+    setCopilotModalMode('applying');
+    setResolverLogs(['Actualizando dependencias...']);
+
+    try {
+      const responseRaw = await (window as any).zero.invoke("dependabot.updateDeps", {
+        projectPath: scanStats!.projectPath,
+        updates: toApply.map(f => ({
+          package: f.filePath,
+          version: f.content,
+        }))
+      });
+      const res = parseResponse(responseRaw);
+
+      let finalLog = `Dependencias actualizadas:\n`;
+      if (res.applied) {
+        res.applied.forEach((f: string) => finalLog += `✅ ${f}\n`);
+      }
+      if (res.errors && res.errors.length > 0) {
+        finalLog += `\nErrores:\n`;
+        res.errors.forEach((e: string) => finalLog += `❌ ${e}\n`);
+      }
+
+      setResolverResult(finalLog);
+      setCopilotModalMode('done');
+    } catch (err: any) {
+      setCopilotModalMode('error');
+      setResolverResult(`Error actualizando dependencias: ${err.message || String(err)}`);
     }
   };
 
@@ -1216,11 +1283,11 @@ export default function App() {
                               <option value="name">Sort by Name</option>
                               <option value="action">Sort by Action</option>
                             </select>
-                            <button className="resolver-btn" onClick={() => { }} style={{ marginLeft: 'auto' }}>
+                            <button className="resolver-btn" onClick={handleResolveDependencies} disabled={showCopilotModal}>
                               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                                 <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
                               </svg>
-                              Resolver incidencias
+                              {showCopilotModal ? 'Actualizando...' : 'Actualizar dependencias'}
                             </button>
                           </div>
 
@@ -1449,11 +1516,15 @@ export default function App() {
                     <polyline points="10 9 9 9 8 9"></polyline>
                   </svg>
                 </div>
-                <h2>Revisar y Aprobar Cambios</h2>
-                <p className="copilot-modal-subtitle">Copilot sugiere los siguientes cambios. Selecciona cuáles aplicar:</p>
+                <h2>{resolveTarget === 'dependabot' ? 'Revisar y Aprobar Actualizaciones' : 'Revisar y Aprobar Cambios'}</h2>
+                <p className="copilot-modal-subtitle">
+                  {resolveTarget === 'dependabot' 
+                    ? 'Dependabot sugiere las siguientes actualizaciones. Selecciona cuáles aplicar:'
+                    : 'Copilot sugiere los siguientes cambios. Selecciona cuáles aplicar:'}
+                </p>
 
                 <div className="fix-approval-actions">
-                  <button className="btn-secondary" onClick={() => setProposedFixes(proposedFixes.map(f => ({ ...f, approved: true })))}>
+                  <button className="btn-secondary" onClick={() => setProposedFixes(proposedFixes.map(f => ({ ...f, approved: f.requiresHumanRevision ? f.approved : true })))}>
                     Aprobar Todos
                   </button>
                   <button className="btn-secondary" onClick={() => setProposedFixes(proposedFixes.map(f => ({ ...f, approved: false })))}>
@@ -1463,28 +1534,42 @@ export default function App() {
 
                 <div className="fix-approval-list">
                   {proposedFixes.map((fix, idx) => {
-                    const parts = fix.filePath.split('/');
-                    const badgeName = parts.length > 1 ? parts[parts.length - 2] : 'root';
-                    const fileName = parts[parts.length - 1];
+                    let badgeName: string;
+                    let fileName: string;
+                    let versionInfo: string | null = null;
+
+                    if (resolveTarget === 'dependabot') {
+                      badgeName = fix.issueRule; // "major", "minor", "patch"
+                      fileName = fix.filePath;   // package name
+                      // Extract version transition from description
+                      const fromMatch = fix.description.match(/from\s+(\S+)\s+to\s+(\S+)/);
+                      if (fromMatch) versionInfo = `${fromMatch[1]} → ${fromMatch[2]}`;
+                    } else {
+                      const parts = fix.filePath.split('/');
+                      badgeName = parts.length > 1 ? parts[parts.length - 2] : 'root';
+                      fileName = parts[parts.length - 1];
+                    }
 
                     return (
                       <div key={idx} className={`fix-approval-item ${fix.approved ? 'approved' : ''} ${fix.requiresHumanRevision ? 'needs-revision' : ''}`} onClick={() => {
-                        if (fix.requiresHumanRevision) return; // Disallow toggling if human revision is required
                         const newFixes = [...proposedFixes];
                         newFixes[idx].approved = !newFixes[idx].approved;
                         setProposedFixes(newFixes);
                       }}>
                         <div className="fix-checkbox">
-                          <input type="checkbox" checked={fix.approved} disabled={fix.requiresHumanRevision} readOnly />
+                          <input type="checkbox" checked={fix.approved} readOnly />
                         </div>
                         <div className="fix-details">
                           <div className="fix-path">
-                            <span className="fix-folder-badge">{badgeName}</span>
+                            <span className={`fix-folder-badge ${resolveTarget === 'dependabot' ? `version-badge ${badgeName}` : ''}`}>{badgeName}</span>
                             {fileName}
                             {fix.difficulty && (
                               <span className={`fix-difficulty-badge difficulty-${fix.difficulty.toLowerCase()}`}>
                                 {fix.difficulty}
                               </span>
+                            )}
+                            {versionInfo && (
+                              <span className="fix-version-transition">{versionInfo}</span>
                             )}
                             {fix.requiresHumanRevision && (
                               <span className="fix-revision-badge">Revisión Humana Requerida</span>
@@ -1500,7 +1585,7 @@ export default function App() {
                 </div>
 
                 <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', marginTop: '2rem' }}>
-                  <button className="copilot-done-btn" onClick={handleApplyFixes} disabled={!proposedFixes.some(f => f.approved)}>
+                  <button className="copilot-done-btn" onClick={resolveTarget === 'dependabot' ? handleApplyDependencyUpdates : handleApplyFixes} disabled={!proposedFixes.some(f => f.approved)}>
                     Aplicar seleccionados ({proposedFixes.filter(f => f.approved).length})
                   </button>
                   <button className="copilot-cancel-btn" onClick={closeCopilotModal}>Cancelar</button>
