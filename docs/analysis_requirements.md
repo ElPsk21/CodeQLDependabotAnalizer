@@ -11,7 +11,7 @@ Estos componentes son necesarios independientemente del tipo de proyecto:
 | Componente | Propósito | Verificación |
 |------------|-----------|-------------|
 | **CodeQL CLI** | Motor de análisis estático | `codeql version` |
-| **Tokei** | Detección automática de lenguajes | Incluido en `scripts/tokei` |
+| **Tokei** | Detección automática de lenguajes | Configurable desde Settings → Tool Paths |
 | **Python 3** | Ejecutar scripts de detección y Dependabot | `python3 --version` |
 | **Dependabot CLI** | Análisis de dependencias vulnerables | Ruta configurada en `dependabot_runner.py` |
 | **Docker** | Requerido por Dependabot CLI para ejecutar actualizadores | `docker --version` |
@@ -25,7 +25,7 @@ Todas las rutas de herramientas externas son configurables desde la sección **S
 | CodeQL CLI | Campo "CodeQL CLI Path" en Settings. Si está vacío, se asume que `codeql` está en el PATH del sistema. |
 | Dependabot CLI | Campo "Dependabot CLI Path" en Settings. Si está vacío, se asume que `dependabot` está en el PATH del sistema. |
 | dotnet SDK | Campo "dotnet SDK PATH" en Settings. Solo necesario para proyectos C#/.NET. |
-| Tokei | `scripts/tokei` (resuelto automáticamente por `project_detector.py` relativo al script). |
+| Tokei | Campo "Tokei Path" en Settings. Si está vacío, se asume que `tokei` está en el PATH del sistema. |
 | Script detector | Resuelto automáticamente relativo al ejecutable (`../scripts/project_detector.py`). |
 | Script Dependabot | Resuelto automáticamente relativo al ejecutable (`../scripts/dependabot_runner.py`). |
 

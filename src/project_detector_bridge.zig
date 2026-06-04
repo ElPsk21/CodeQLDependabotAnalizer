@@ -4,6 +4,7 @@ const zero_native = @import("zero-native");
 pub const ProjectDetectorBridge = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    tokei_path: []const u8 = "",
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) ProjectDetectorBridge {
         return .{ .allocator = allocator, .io = io };
@@ -84,8 +85,12 @@ pub const ProjectDetectorBridge = struct {
         };
         defer allocator.free(script_path);
 
+        // Build argv: if tokei_path is configured, pass it as --tokei-path argument
         const result = std.process.run(allocator, self.io, .{
-            .argv = &.{ script_path, project_path },
+            .argv = if (self.tokei_path.len > 0)
+                &.{ script_path, project_path, "--tokei-path", self.tokei_path }
+            else
+                &.{ script_path, project_path },
         }) catch |err| {
             std.debug.print("[Error] Failed to start project detector script: {s}\n", .{@errorName(err)});
             self.fail(responder, request_id, "Failed to run detector script", err) catch {};

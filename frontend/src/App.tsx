@@ -78,6 +78,7 @@ export default function App() {
   const [codeqlPath, setCodeqlPath] = useState(() => localStorage.getItem("settings.codeqlPath") || "");
   const [dependabotCliPath, setDependabotCliPath] = useState(() => localStorage.getItem("settings.dependabotCliPath") || "");
   const [dotnetPath, setDotnetPath] = useState(() => localStorage.getItem("settings.dotnetPath") || "");
+  const [tokeiPath, setTokeiPath] = useState(() => localStorage.getItem("settings.tokeiPath") || "");
   const [copilotCliPath, setCopilotCliPath] = useState(() => localStorage.getItem("settings.copilotCliPath") || "");
   const [settingsSaved, setSettingsSaved] = useState(false);
   const [depSearch, setDepSearch] = useState("");
@@ -116,8 +117,26 @@ export default function App() {
 
   useEffect(() => {
     initializeFirebasePush().then(token => {
-      if (token && (window as any).zero) {
-        (window as any).zero.invoke("firebase.saveToken", { token }).catch(console.error);
+      if (token) {
+        if ((window as any).zero) {
+          (window as any).zero.invoke("firebase.saveToken", { token }).catch(console.error);
+        } else {
+          // Si estamos en un navegador normal (como Chrome), enviamos el token al servidor de desarrollo de Vite
+          fetch("/api/save-token", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ token }),
+          })
+            .then(res => res.json())
+            .then(data => {
+              console.log("[FCM] Token guardado automáticamente en el servidor de desarrollo:", data);
+            })
+            .catch(err => {
+              console.error("[FCM] Error enviando token al servidor de desarrollo:", err);
+            });
+        }
       }
     });
     listenToMessages();
@@ -197,6 +216,7 @@ export default function App() {
         codeqlPath: localStorage.getItem("settings.codeqlPath") || "",
         dependabotCliPath: localStorage.getItem("settings.dependabotCliPath") || "",
         dotnetPath: localStorage.getItem("settings.dotnetPath") || "",
+        tokeiPath: localStorage.getItem("settings.tokeiPath") || "",
         copilotCliPath: localStorage.getItem("settings.copilotCliPath") || ""
       });
     } catch (e) {
@@ -230,6 +250,7 @@ export default function App() {
     localStorage.setItem("settings.codeqlPath", codeqlPath);
     localStorage.setItem("settings.dependabotCliPath", dependabotCliPath);
     localStorage.setItem("settings.dotnetPath", dotnetPath);
+    localStorage.setItem("settings.tokeiPath", tokeiPath);
     localStorage.setItem("settings.copilotCliPath", copilotCliPath);
     await sendPathsToBackend();
     setSettingsSaved(true);
@@ -983,6 +1004,25 @@ export default function App() {
                       </button>
                     </div>
                     <p className="settings-help">Directory containing the dotnet SDK. Only required for C#/.NET projects.</p>
+                  </div>
+
+                  <div className="settings-field">
+                    <label htmlFor="tokei-path">Tokei Path</label>
+                    <div className="settings-input-row">
+                      <input
+                        id="tokei-path"
+                        type="text"
+                        className="settings-input"
+                        value={tokeiPath}
+                        onChange={e => setTokeiPath(e.target.value)}
+                        placeholder="e.g. /usr/local/bin/tokei"
+                      />
+                      <button className="settings-browse-btn" onClick={() => handleBrowse(setTokeiPath, "settings.tokeiPath")}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                        Browse
+                      </button>
+                    </div>
+                    <p className="settings-help">Path to the Tokei binary for language detection. Falls back to system PATH if empty.</p>
                   </div>
 
                   <div className="settings-field">

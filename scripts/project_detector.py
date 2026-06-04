@@ -108,7 +108,7 @@ def get_ecosystems(project_path):
     debug(f"Total ecosystems found: {len(ecosystems)}")
     return ecosystems
 
-def run_detection(project_path):
+def run_detection(project_path, tokei_path=None):
     debug(f"=== Project Detection Start ===")
     debug(f"Raw input path: '{project_path}'")
     
@@ -137,16 +137,16 @@ def run_detection(project_path):
     except PermissionError as e:
         debug(f"  WARNING: Cannot list directory contents: {e}")
     
-    # Locate tokei binary (assume it's in the same directory as this script)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    tokei_bin = os.path.join(script_dir, "tokei")
-    
-    if not os.path.exists(tokei_bin):
-        # Fallback to checking system path
-        debug(f"Tokei not found at {tokei_bin}, falling back to system PATH")
-        tokei_bin = "tokei"
+    # Locate tokei binary: use explicit path from settings, or fall back to system PATH
+    if tokei_path and os.path.exists(tokei_path):
+        tokei_bin = tokei_path
+        debug(f"Using tokei binary from settings: {tokei_bin}")
     else:
-        debug(f"Using tokei binary: {tokei_bin}")
+        if tokei_path:
+            debug(f"Configured tokei path not found at {tokei_path}, falling back to system PATH")
+        else:
+            debug(f"No tokei path configured, using system PATH")
+        tokei_bin = "tokei"
         
     try:
         debug(f"Running: {tokei_bin} -o json {project_path}")
@@ -213,5 +213,15 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(json.dumps({"error": "Project path required"}))
         sys.exit(1)
-        
-    run_detection(sys.argv[1])
+    
+    project_path_arg = sys.argv[1]
+    tokei_path_arg = None
+    
+    # Parse optional --tokei-path argument
+    if "--tokei-path" in sys.argv:
+        idx = sys.argv.index("--tokei-path")
+        if idx + 1 < len(sys.argv):
+            tokei_path_arg = sys.argv[idx + 1]
+            debug(f"Received --tokei-path: {tokei_path_arg}")
+    
+    run_detection(project_path_arg, tokei_path=tokei_path_arg)

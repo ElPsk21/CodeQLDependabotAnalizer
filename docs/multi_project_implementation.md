@@ -31,7 +31,6 @@ El flujo de análisis se divide en dos fases principales:
 | [`src/dependabot_bridge.zig`](file:///home/frano/my_app/src/dependabot_bridge.zig) | Bridge Zig para Dependabot (`dependabot.runScan`). |
 | [`scripts/project_detector.py`](file:///home/frano/my_app/scripts/project_detector.py) | Script Python que usa Tokei para detectar lenguajes y busca manifiestos de dependencias. |
 | [`scripts/dependabot_runner.py`](file:///home/frano/my_app/scripts/dependabot_runner.py) | Script Python que ejecuta el CLI de Dependabot y parsea los resultados. |
-| [`scripts/tokei`](file:///home/frano/my_app/scripts/tokei) | Binario de Tokei (contador de líneas de código por lenguaje). |
 
 ---
 
@@ -69,6 +68,8 @@ Este comando es gestionado por [`project_detector_bridge.zig`](file:///home/fran
 #### 3a. Detección de lenguajes con Tokei
 
 - Ejecuta `tokei -o json <ruta_del_proyecto>` ([línea 153](file:///home/frano/my_app/scripts/project_detector.py#L151-L157)).
+- La ruta al binario de Tokei se configura desde **Settings → Tool Paths → Tokei Path**. Si no se configura, se usa `tokei` del PATH del sistema.
+- Si el bridge de detección recibe un `tokeiPath` configurado, se lo pasa al script como argumento `--tokei-path`.
 - Tokei devuelve un JSON con todos los lenguajes detectados y las líneas de código de cada uno.
 - El script mapea los lenguajes de Tokei a lenguajes compatibles con CodeQL usando el diccionario [`CODEQL_LANGUAGE_MAP`](file:///home/frano/my_app/scripts/project_detector.py#L8-L24):
 

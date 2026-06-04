@@ -77,6 +77,7 @@ pub const SettingsBridge = struct {
     codeql_bridge: *bridge.CodeQlBridge,
     dependabot_bridge_instance: *dependabot_bridge.DependabotBridge,
     copilot_bridge_instance: *copilot_bridge.CopilotBridge,
+    project_detector_bridge_instance: *project_detector_bridge.ProjectDetectorBridge,
     allocator: std.mem.Allocator,
 
     pub fn updatePaths(context: *anyopaque, invocation: zero_native.bridge.Invocation, responder: zero_native.bridge.AsyncResponder) anyerror!void {
@@ -134,6 +135,23 @@ pub const SettingsBridge = struct {
             }
         }
 
+        // Parse tokeiPath
+        const tokei_key = "\"tokeiPath\":\"";
+        if (std.mem.indexOf(u8, payload, tokei_key)) |idx| {
+            const start = idx + tokei_key.len;
+            if (std.mem.indexOfScalarPos(u8, payload, start, '"')) |end| {
+                const value = payload[start..end];
+                if (value.len > 0) {
+                    if (self.project_detector_bridge_instance.tokei_path.len > 0) {
+                        self.allocator.free(self.project_detector_bridge_instance.tokei_path);
+                    }
+                    const duped = try self.allocator.dupe(u8, value);
+                    self.project_detector_bridge_instance.tokei_path = duped;
+                    std.debug.print("[Settings] Tokei path set to: {s}\n", .{duped});
+                }
+            }
+        }
+
         // Parse copilotCliPath
         const cop_key = "\"copilotCliPath\":\"";
         if (std.mem.indexOf(u8, payload, cop_key)) |idx| {
@@ -173,6 +191,7 @@ pub fn main(init: std.process.Init) !void {
         .codeql_bridge = &app_instance.codeql_bridge,
         .dependabot_bridge_instance = &app_instance.dependabot_bridge,
         .copilot_bridge_instance = &app_instance.copilot_bridge,
+        .project_detector_bridge_instance = &app_instance.project_detector_bridge,
         .allocator = allocator,
     };
 
@@ -286,5 +305,8 @@ pub fn main(init: std.process.Init) !void {
     }
     if (app_instance.copilot_bridge.copilot_cli_path.len > 0) {
         allocator.free(app_instance.copilot_bridge.copilot_cli_path);
+    }
+    if (app_instance.project_detector_bridge.tokei_path.len > 0) {
+        allocator.free(app_instance.project_detector_bridge.tokei_path);
     }
 }
